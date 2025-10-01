@@ -19,16 +19,42 @@ const (
 	defaultLargeWriteThreshold = 1 / math.Phi
 )
 
+// Options defines the configuration for file rotation and buffering.
 type Options struct {
+	// FilePathPattern specifies the pattern for file naming.
+	// It uses time.Format style for date/time substitution.
+	// For example: "logs/app-2006-01-02.log"
 	FilePathPattern string
-	FileSizeLimit   int64
+
+	// FileSizeLimit is the maximum size (in bytes) a single log file can reach
+	// before rotation occurs. A non-positive value disables size-based rotation.
+	FileSizeLimit int64
 
 	// For buffering
-	BufferSize          int
+
+	// BufferSize is the size (in bytes) of the internal buffer.
+	// A zero value uses a default size of 8MB.
+	// If a buffered writer is not desired, set it to a negative value (e.g., -1).
+	BufferSize int
+
+	// LargeWriteThreshold is a ratio (0.0 to 1.0) of BufferSize.
+	// If a single write operation is larger than this threshold, it will bypass the buffer
+	// and write directly to the underlying file.
+	// A non-positive value uses a default threshold based on the golden ratio (0.618).
 	LargeWriteThreshold float64
-	FlushInterval       time.Duration
-	MaxIdleBufferAge    time.Duration
-	LogFlushErr         func(error)
+
+	// FlushInterval specifies how often the buffer should be automatically flushed.
+	// A non-positive value uses a default interval of 1 second.
+	FlushInterval time.Duration
+
+	// MaxIdleBufferAge specifies the maximum time the buffer can remain empty
+	// before the auto-flushing background routine stops to conserve resources.
+	// A non-positive value uses a default age of 3 seconds.
+	MaxIdleBufferAge time.Duration
+
+	// LogFlushErr is a function to handle errors that occur during background
+	// automatic flushing. If nil, errors are silently ignored.
+	LogFlushErr func(error)
 }
 
 type fileManager struct {
@@ -43,6 +69,8 @@ type fileManager struct {
 	file      *os.File
 }
 
+// OpenFile creates a new io.WriteCloser with file rotation and optional buffering
+// based on the provided Options.
 func OpenFile(options Options) (io.WriteCloser, error) {
 	if options.FilePathPattern == "" {
 		return nil, errors.New("filerotate: no file path pattern")
