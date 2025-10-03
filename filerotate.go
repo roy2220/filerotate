@@ -230,14 +230,14 @@ func (m *fileManager) Close() error {
 }
 
 type bufferedWriteCloser struct {
-	wc               io.WriteCloser
-	bufferSize       int
-	largeWriteSize   int
-	flushInterval    time.Duration
-	maxIdleBufferAge time.Duration
-	logFlushErr      func(error)
-	go1              func(func())
-	clock            clock.Clock
+	wc                io.WriteCloser
+	bufferSize        int
+	minLargeWriteSize int
+	flushInterval     time.Duration
+	maxIdleBufferAge  time.Duration
+	logFlushErr       func(error)
+	go1               func(func())
+	clock             clock.Clock
 
 	backgroundCtx context.Context
 	cancel        context.CancelFunc
@@ -246,6 +246,7 @@ type bufferedWriteCloser struct {
 	lock                 sync.Mutex
 	isClosing            bool
 	isClosed             bool
+	hasPendingWrites     bool
 	pendingData          []byte
 	autoFlusherIsRunning bool
 }
@@ -268,7 +269,7 @@ func newBufferedWriteCloser(
 	} else if largeWriteThreshold > 1.0 {
 		largeWriteThreshold = 1.0
 	}
-	largeWriteSize := int(math.Ceil(float64(bufferSize) * largeWriteThreshold))
+	minLargeWriteSize := int(math.Ceil(float64(bufferSize) * largeWriteThreshold))
 	if flushInterval < 1 {
 		flushInterval = defaultFlushInterval
 	}
@@ -282,16 +283,16 @@ func newBufferedWriteCloser(
 	backgroundCtx, cancel := context.WithCancel(context.Background())
 
 	return &bufferedWriteCloser{
-		wc:               wc,
-		bufferSize:       bufferSize,
-		largeWriteSize:   largeWriteSize,
-		flushInterval:    flushInterval,
-		maxIdleBufferAge: maxIdleBufferAge,
-		logFlushErr:      logFlushErr,
-		go1:              go1,
-		clock:            clock,
-		backgroundCtx:    backgroundCtx,
-		cancel:           cancel,
+		wc:                wc,
+		bufferSize:        bufferSize,
+		minLargeWriteSize: minLargeWriteSize,
+		flushInterval:     flushInterval,
+		maxIdleBufferAge:  maxIdleBufferAge,
+		logFlushErr:       logFlushErr,
+		go1:               go1,
+		clock:             clock,
+		backgroundCtx:     backgroundCtx,
+		cancel:            cancel,
 	}
 }
 
@@ -304,30 +305,28 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 	}
 
 	n := len(p)
-	if n == 0 {
-		return 0, nil
-	}
-
-	if n <= wc.bufferSize-len(wc.pendingData) {
-		if len(wc.pendingData) == 0 && n >= wc.largeWriteSize {
+	if n <= wc.bufferSize-len(wc.pendingData) { // remaining buffer space is sufficient
+		if len(wc.pendingData) == 0 && n >= wc.minLargeWriteSize {
 			return wc.wc.Write(p)
 		}
-	} else {
+	} else { // remaining buffer space is insufficient
 		if len(wc.pendingData) >= 1 {
 			if err := wc.flushLocked(); err != nil {
 				return 0, err
 			}
 		}
-		if n >= wc.largeWriteSize {
+		if n >= wc.minLargeWriteSize {
 			return wc.wc.Write(p)
 		}
 	}
 
+	wc.hasPendingWrites = true
 	if wc.pendingData == nil {
 		wc.pendingData = make([]byte, 0, wc.bufferSize)
 	}
 	wc.pendingData = append(wc.pendingData, p...)
 	wc.runAutoFlusherLocked()
+
 	return n, nil
 }
 
@@ -371,7 +370,7 @@ func (wc *bufferedWriteCloser) autoFlush() {
 				}
 			}()
 
-			if len(wc.pendingData) >= 1 {
+			if wc.hasPendingWrites {
 				idleBufferAge = 0
 				flushErr = wc.flushLocked()
 			} else {
@@ -396,6 +395,8 @@ func (wc *bufferedWriteCloser) flushLocked() error {
 		}
 		return err
 	}
+
+	wc.hasPendingWrites = false
 	wc.pendingData = wc.pendingData[:0]
 	return nil
 }
@@ -421,7 +422,7 @@ func (wc *bufferedWriteCloser) Close() error {
 		return ErrClosed
 	}
 
-	if len(wc.pendingData) >= 1 {
+	if wc.hasPendingWrites {
 		flushErr = wc.flushLocked()
 		wc.pendingData = nil
 	}

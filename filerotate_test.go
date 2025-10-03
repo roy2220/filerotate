@@ -495,6 +495,45 @@ func Test_Write(t *testing.T) {
 			require.Equal(t, int64(1), goroutineCount.Load())
 		},
 	)
+
+	t.Run(
+		"flushes even when there's no data to flush",
+		func(t *testing.T) {
+			clock := clock.NewMock()
+			clock.Set(t0)
+			fs := afero.NewMemMapFs()
+
+			wc, err := OpenFile(Options{
+				Clock: clock,
+				Fs:    fs,
+
+				FilePathPattern: "/log/2006-01-02-15.log",
+				BufferSize:      1000,
+				FlushInterval:   time.Minute,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				err := wc.Close()
+				assert.NoError(t, err)
+			})
+
+			n, err := wc.Write([]byte(""))
+			require.NoError(t, err)
+			require.Equal(t, 0, n)
+
+			time.Sleep(25 * time.Millisecond)
+
+			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
+			require.False(t, ok)
+
+			clock.Add(10 * time.Minute)
+			time.Sleep(25 * time.Millisecond)
+
+			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
+			require.NoError(t, err)
+			require.Equal(t, "", string(data))
+		},
+	)
 }
 
 func Test_Close(t *testing.T) {
@@ -606,6 +645,43 @@ func Test_Close(t *testing.T) {
 			require.Equal(t, "abc\n", string(data))
 
 			require.Equal(t, int64(0), goroutineCount.Load())
+		},
+	)
+
+	t.Run(
+		"flushes even when there's no data to flush",
+		func(t *testing.T) {
+			clock := clock.NewMock()
+			clock.Set(t0)
+			fs := afero.NewMemMapFs()
+
+			wc, err := OpenFile(Options{
+				Clock: clock,
+				Fs:    fs,
+
+				FilePathPattern: "/log/2006-01-02-15.log",
+				BufferSize:      1000,
+				FlushInterval:   time.Minute,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				if wc != nil {
+					err := wc.Close()
+					assert.NoError(t, err)
+				}
+			})
+
+			n, err := wc.Write([]byte(""))
+			require.NoError(t, err)
+			require.Equal(t, 0, n)
+
+			err = wc.Close()
+			wc = nil
+			require.NoError(t, err)
+
+			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
+			require.NoError(t, err)
+			require.Equal(t, "", string(data))
 		},
 	)
 }
