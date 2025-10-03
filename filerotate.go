@@ -3,6 +3,7 @@ package filerotate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/benbjohnson/clock"
+	"github.com/lestrrat-go/strftime"
 	"github.com/spf13/afero"
 )
 
@@ -25,8 +27,8 @@ const (
 // Options defines the configuration for file rotation and buffering.
 type Options struct {
 	// FilePathPattern specifies the pattern for file naming.
-	// It uses time.Format style for date/time substitution.
-	// For example: "logs/app-2006-01-02.log"
+	// It uses strftime format for date/time substitution.
+	// For example: "logs/app-%Y-%m-%d.log"
 	FilePathPattern string
 
 	// FileSizeLimit is the maximum size (in bytes) a single log file can reach
@@ -74,7 +76,7 @@ type Options struct {
 }
 
 type fileManager struct {
-	filePathPattern string
+	filePathPattern *strftime.Strftime
 	fileSizeLimit   int64
 	clock           clock.Clock
 	fs              afero.Fs
@@ -93,6 +95,10 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 	if options.FilePathPattern == "" {
 		return nil, errors.New("filerotate: no file path pattern")
 	}
+	filePathPattern, err := strftime.New(options.FilePathPattern)
+	if err != nil {
+		return nil, fmt.Errorf("filerotate: invalid file path pattern: %v", err)
+	}
 	if options.Go == nil {
 		options.Go = func(f func()) { go f() }
 	}
@@ -103,7 +109,7 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 		options.Fs = afero.NewOsFs()
 	}
 	wc := io.WriteCloser(&fileManager{
-		filePathPattern: options.FilePathPattern,
+		filePathPattern: filePathPattern,
 		fileSizeLimit:   options.FileSizeLimit,
 		clock:           options.Clock,
 		fs:              options.Fs,
@@ -143,7 +149,7 @@ func (m *fileManager) Write(p []byte) (int, error) {
 }
 
 func (m *fileManager) openFileLocked() error {
-	filePath0 := m.clock.Now().Format(m.filePathPattern)
+	filePath0 := m.filePathPattern.FormatString(m.clock.Now())
 	if m.filePath0 != filePath0 {
 		lastFileIndex := -1
 		var lastFilePath string

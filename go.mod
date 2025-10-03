@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/benbjohnson/clock v1.3.5
+	github.com/lestrrat-go/strftime v1.1.1
 	github.com/spf13/afero v1.15.0
 	github.com/stretchr/testify v1.11.1
 )

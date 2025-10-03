@@ -1,6 +1,11 @@
 package filerotate_test
 
 import (
+	"bytes"
+	"crypto/md5"
+	"os"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,7 +39,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      -1,
 			})
 			require.NoError(t, err)
@@ -90,7 +95,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				FileSizeLimit:   6,
 				BufferSize:      -1,
 			})
@@ -170,7 +175,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				FileSizeLimit:   6,
 				BufferSize:      -1,
 			})
@@ -208,7 +213,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				FileSizeLimit:   6,
 				BufferSize:      -1,
 			})
@@ -239,7 +244,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
 				FlushInterval:   time.Minute,
 			})
@@ -290,7 +295,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:     "/log/2006-01-02-15.log",
+				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          100,
 				LargeWriteThreshold: 0.05,
 				FlushInterval:       time.Minute,
@@ -322,7 +327,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:     "/log/2006-01-02-15.log",
+				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          10,
 				LargeWriteThreshold: 0.6,
 				FlushInterval:       time.Minute,
@@ -365,7 +370,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:     "/log/2006-01-02-15.log",
+				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          100,
 				LargeWriteThreshold: 0.05,
 				FlushInterval:       time.Minute,
@@ -400,7 +405,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:     "/log/2006-01-02-15.log",
+				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          10,
 				LargeWriteThreshold: 1.0,
 				FlushInterval:       time.Minute,
@@ -459,7 +464,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:  "/log/2006-01-02-15.log",
+				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
 				BufferSize:       1000,
 				FlushInterval:    time.Minute,
 				MaxIdleBufferAge: 3 * time.Minute,
@@ -507,7 +512,7 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
 				FlushInterval:   time.Minute,
 			})
@@ -552,7 +557,7 @@ func Test_Close(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      -1,
 			})
 			require.NoError(t, err)
@@ -580,7 +585,7 @@ func Test_Close(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
 				FlushInterval:   time.Minute,
 			})
@@ -617,7 +622,7 @@ func Test_Close(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:  "/log/2006-01-02-15.log",
+				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
 				BufferSize:       1000,
 				FlushInterval:    time.Minute,
 				MaxIdleBufferAge: 3 * time.Minute,
@@ -659,7 +664,7 @@ func Test_Close(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/2006-01-02-15.log",
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
 				FlushInterval:   time.Minute,
 			})
@@ -684,4 +689,55 @@ func Test_Close(t *testing.T) {
 			require.Equal(t, "", string(data))
 		},
 	)
+}
+
+func Test_Comprehensive(t *testing.T) {
+	const N = 10
+	const M = 200
+
+	dirPath := t.TempDir()
+	wc, err := OpenFile(Options{
+		FilePathPattern: filepath.Join(dirPath, "%Y-%m-%d-%H-%M-%S.log"),
+		FileSizeLimit:   10000,
+		BufferSize:      100,
+		FlushInterval:   30 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	line := []byte("The quick brown fox jumps over the lazy dog\n")
+	var wg sync.WaitGroup
+	for range N {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range M {
+				_, err := wc.Write(line)
+				require.NoError(t, err)
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+	}
+	wg.Wait()
+
+	err = wc.Close()
+	assert.NoError(t, err)
+
+	entries, err := os.ReadDir(dirPath)
+	require.NoError(t, err)
+	hash := md5.New()
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		filePath := filepath.Join(dirPath, entry.Name())
+		fileInfo, err := entry.Info()
+		require.NoError(t, err)
+		t.Logf("filePath=%q fileSize=%v", filePath, fileInfo.Size())
+		data, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+		hash.Write(data)
+	}
+
+	expectedHashSum := md5.Sum(bytes.Repeat(line, N*M))
+	require.Equal(t, expectedHashSum[:], hash.Sum(nil))
 }

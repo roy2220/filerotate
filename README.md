@@ -24,9 +24,9 @@ import (
 
 func main() {
     options := filerotate.Options{
-        // Mandatory: Use Go's time.Format style for substitution.
+        // Mandatory: Use strftime format for substitution.
         // This pattern creates a new file every day, e.g., "logs/app-2023-10-02.log"
-        FilePathPattern: "logs/app-2006-01-02.log",
+        FilePathPattern: "logs/app-%Y-%m-%d.log",
 
         // Optional: Rotate the file if it exceeds 100MB
         FileSizeLimit: 100 * 1024 * 1024,
@@ -64,7 +64,7 @@ The `filerotate.Options` struct controls both file rotation and I/O buffering.
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
-| **`FilePathPattern`** | `string` | **Mandatory.** The file naming pattern using `time.Format` (e.g., `"logs/app-2006-01-02.log"`). Rotation occurs when the current time generates a different path. |
+| **`FilePathPattern`** | `string` | **Mandatory.** The file naming pattern using strftime format (e.g., `"logs/app-%Y-%m-%d.log"`). Rotation occurs when the current time generates a different path. |
 | **`FileSizeLimit`** | `int64` | The maximum size (in bytes) of a single file. Set to a non-positive value (e.g., `0`) to **disable size-based rotation**. Rotated files are appended with an index, e.g., `app-2023-10-02.log.1`, `app-2023-10-02.log.2`, etc. |
 
 ### Buffering Settings
