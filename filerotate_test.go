@@ -464,10 +464,10 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
-				BufferSize:       1000,
-				FlushInterval:    time.Minute,
-				MaxIdleBufferAge: 3 * time.Minute,
+				FilePathPattern:   "/log/%Y-%m-%d-%H.log",
+				BufferSize:        1000,
+				FlushInterval:     time.Minute,
+				IdleBufferTimeout: 3 * time.Minute,
 			})
 			require.NoError(t, err)
 			t.Cleanup(func() {
@@ -486,7 +486,7 @@ func Test_Write(t *testing.T) {
 			require.Equal(t, int64(1), goroutineCount.Load())
 
 			time.Sleep(25 * time.Millisecond)
-			clock.Add(4*time.Minute + time.Second)
+			clock.Add(3*time.Minute + time.Second)
 			time.Sleep(25 * time.Millisecond)
 
 			require.Equal(t, int64(0), goroutineCount.Load())
@@ -622,10 +622,10 @@ func Test_Close(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
-				BufferSize:       1000,
-				FlushInterval:    time.Minute,
-				MaxIdleBufferAge: 3 * time.Minute,
+				FilePathPattern:   "/log/%Y-%m-%d-%H.log",
+				BufferSize:        1000,
+				FlushInterval:     time.Minute,
+				IdleBufferTimeout: 3 * time.Minute,
 			})
 			require.NoError(t, err)
 			t.Cleanup(func() {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,13 +16,6 @@ import (
 	"github.com/benbjohnson/clock"
 	"github.com/lestrrat-go/strftime"
 	"github.com/spf13/afero"
-)
-
-const (
-	defaultBufferSize          = 8 * 1024 * 1024
-	defaultFlushInterval       = 1 * time.Second
-	defaultMaxIdleBufferAge    = 3 * time.Second
-	defaultLargeWriteThreshold = 1 / math.Phi
 )
 
 // Options defines the configuration for file rotation and buffering.
@@ -52,14 +46,19 @@ type Options struct {
 	// A non-positive value uses a default interval of 1 second.
 	FlushInterval time.Duration
 
-	// MaxIdleBufferAge specifies the maximum time the buffer can remain empty
-	// before the auto-flushing background routine stops to conserve resources.
-	// A non-positive value uses a default age of 3 seconds.
-	MaxIdleBufferAge time.Duration
+	// IdleBufferTimeout specifies the maximum duration the buffer can remain idle
+	// (without new writes) before the auto-flusher goroutine stops and releases
+	// the buffer memory. When the buffer has been idle for this duration, the
+	// internal buffer slice is set to nil to free memory. A non-positive value
+	// uses a default timeout of 3 seconds.
+	IdleBufferTimeout time.Duration
 
-	// LogFlushErr is a function to handle errors that occur during background
-	// automatic flushing. If nil, errors are silently ignored.
-	LogFlushErr func(error)
+	// LogInternalError specifies a callback function for handling internal errors
+	// that occur during background operations (such as auto-flushing failures or
+	// file close errors). These errors cannot be returned to the caller directly
+	// since they happen asynchronously. If nil, a default logger is used that
+	// writes to the standard log with the prefix "filerotate internal error: ".
+	LogInternalError func(error)
 
 	// The options below serve for testing.
 
@@ -75,11 +74,21 @@ type Options struct {
 	Fs afero.Fs
 }
 
+const (
+	defaultBufferSize          = 8 * 1024 * 1024
+	defaultFlushInterval       = 1 * time.Second
+	defaultIdleBufferTimeout   = 3 * time.Second
+	defaultLargeWriteThreshold = 1 / math.Phi
+)
+
+func defaultLogInternalError(err error) { log.Printf("filerotate internal error: %v", err) }
+
 type fileManager struct {
-	filePathPattern *strftime.Strftime
-	fileSizeLimit   int64
-	clock           clock.Clock
-	fs              afero.Fs
+	filePathPattern  *strftime.Strftime
+	fileSizeLimit    int64
+	logInternalError func(error)
+	clock            clock.Clock
+	fs               afero.Fs
 
 	lock      sync.Mutex
 	isClosed  bool
@@ -109,10 +118,11 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 		options.Fs = afero.NewOsFs()
 	}
 	wc := io.WriteCloser(&fileManager{
-		filePathPattern: filePathPattern,
-		fileSizeLimit:   options.FileSizeLimit,
-		clock:           options.Clock,
-		fs:              options.Fs,
+		filePathPattern:  filePathPattern,
+		fileSizeLimit:    options.FileSizeLimit,
+		logInternalError: options.LogInternalError,
+		clock:            options.Clock,
+		fs:               options.Fs,
 	})
 	if options.BufferSize >= 0 {
 		wc = newBufferedWriteCloser(
@@ -120,8 +130,8 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 			options.BufferSize,
 			options.LargeWriteThreshold,
 			options.FlushInterval,
-			options.MaxIdleBufferAge,
-			options.LogFlushErr,
+			options.IdleBufferTimeout,
+			options.LogInternalError,
 			options.Go,
 			options.Clock,
 		)
@@ -186,7 +196,9 @@ func (m *fileManager) openFileLocked() error {
 		m.fileIndex = fileIndex
 		m.fileSize = fileSize
 		if m.file != nil {
-			m.file.Close()
+			if err = m.file.Close(); err != nil {
+				m.logInternalError(fmt.Errorf("close file: %w", err))
+			}
 		}
 		m.file = file
 	}
@@ -201,7 +213,9 @@ func (m *fileManager) openFileLocked() error {
 
 		m.fileIndex = fileIndex
 		m.fileSize = 0
-		m.file.Close()
+		if err = m.file.Close(); err != nil {
+			m.logInternalError(fmt.Errorf("close file: %w", err))
+		}
 		m.file = file
 	}
 
@@ -240,8 +254,8 @@ type bufferedWriteCloser struct {
 	bufferSize        int
 	minLargeWriteSize int
 	flushInterval     time.Duration
-	maxIdleBufferAge  time.Duration
-	logFlushErr       func(error)
+	idleBufferTimeout time.Duration
+	logInternalError  func(error)
 	go1               func(func())
 	clock             clock.Clock
 
@@ -262,8 +276,8 @@ func newBufferedWriteCloser(
 	bufferSize int,
 	largeWriteThreshold float64,
 	flushInterval time.Duration,
-	maxIdleBufferAge time.Duration,
-	logFlushErr func(error),
+	idleBufferTimeout time.Duration,
+	logInternalError func(error),
 	go1 func(func()),
 	clock clock.Clock,
 ) io.WriteCloser {
@@ -279,11 +293,11 @@ func newBufferedWriteCloser(
 	if flushInterval < 1 {
 		flushInterval = defaultFlushInterval
 	}
-	if maxIdleBufferAge < 1 {
-		maxIdleBufferAge = defaultMaxIdleBufferAge
+	if idleBufferTimeout < 1 {
+		idleBufferTimeout = defaultIdleBufferTimeout
 	}
-	if logFlushErr == nil {
-		logFlushErr = func(error) {}
+	if logInternalError == nil {
+		logInternalError = defaultLogInternalError
 	}
 
 	backgroundCtx, cancel := context.WithCancel(context.Background())
@@ -293,8 +307,8 @@ func newBufferedWriteCloser(
 		bufferSize:        bufferSize,
 		minLargeWriteSize: minLargeWriteSize,
 		flushInterval:     flushInterval,
-		maxIdleBufferAge:  maxIdleBufferAge,
-		logFlushErr:       logFlushErr,
+		idleBufferTimeout: idleBufferTimeout,
+		logInternalError:  logInternalError,
 		go1:               go1,
 		clock:             clock,
 		backgroundCtx:     backgroundCtx,
@@ -367,20 +381,16 @@ func (wc *bufferedWriteCloser) autoFlush() {
 		}
 
 		if ok := func() bool {
-			var flushErr error
 			wc.lock.Lock()
-			defer func() {
-				wc.lock.Unlock()
-				if flushErr != nil {
-					wc.logFlushErr(flushErr)
-				}
-			}()
+			defer wc.lock.Unlock()
 
 			if wc.hasPendingWrites {
 				idleBufferTime = now
-				flushErr = wc.flushLocked()
+				if err := wc.flushLocked(); err != nil {
+					wc.logInternalError(err)
+				}
 			} else {
-				if now.Sub(idleBufferTime) > wc.maxIdleBufferAge {
+				if now.Sub(idleBufferTime) >= wc.idleBufferTimeout {
 					wc.pendingData = nil
 					wc.autoFlusherIsRunning = false
 					return false
@@ -400,7 +410,7 @@ func (wc *bufferedWriteCloser) flushLocked() error {
 			copy(wc.pendingData, wc.pendingData[n:])
 			wc.pendingData = wc.pendingData[:len(wc.pendingData)-n]
 		}
-		return err
+		return fmt.Errorf("commit writes: %w", err)
 	}
 
 	wc.hasPendingWrites = false
@@ -416,21 +426,17 @@ func (wc *bufferedWriteCloser) Close() error {
 	wc.cancel()
 	wc.wg.Wait()
 
-	var flushErr error
 	wc.lock.Lock()
-	defer func() {
-		wc.lock.Unlock()
-		if flushErr != nil {
-			wc.logFlushErr(flushErr)
-		}
-	}()
+	defer wc.lock.Unlock()
 
 	if wc.isClosed {
 		return ErrClosed
 	}
 
 	if wc.hasPendingWrites {
-		flushErr = wc.flushLocked()
+		if err := wc.flushLocked(); err != nil {
+			wc.logInternalError(err)
+		}
 		wc.pendingData = nil
 	}
 
