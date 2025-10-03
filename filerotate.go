@@ -351,16 +351,16 @@ func (wc *bufferedWriteCloser) autoFlush() {
 	ticker := wc.clock.Ticker(wc.flushInterval)
 	defer ticker.Stop()
 
-	var idleBufferAge time.Duration
-	ok := true
-	for ok {
+	idleBufferTime := wc.clock.Now()
+	for {
+		var now time.Time
 		select {
-		case <-ticker.C:
+		case now = <-ticker.C:
 		case <-wc.backgroundCtx.Done():
 			return
 		}
 
-		ok = func() bool {
+		if ok := func() bool {
 			var flushErr error
 			wc.lock.Lock()
 			defer func() {
@@ -371,18 +371,19 @@ func (wc *bufferedWriteCloser) autoFlush() {
 			}()
 
 			if wc.hasPendingWrites {
-				idleBufferAge = 0
+				idleBufferTime = now
 				flushErr = wc.flushLocked()
 			} else {
-				idleBufferAge += wc.flushInterval
-				if idleBufferAge > wc.maxIdleBufferAge {
+				if now.Sub(idleBufferTime) > wc.maxIdleBufferAge {
 					wc.pendingData = nil
 					wc.autoFlusherIsRunning = false
 					return false
 				}
 			}
 			return true
-		}()
+		}(); !ok {
+			return
+		}
 	}
 }
 
