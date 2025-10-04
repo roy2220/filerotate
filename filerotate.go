@@ -294,7 +294,7 @@ func (m *fileManager) updateSymbolicLink(symbolicLinkPath string, filePath strin
 	if err := m.fs.MkdirAll(filepath.Dir(symbolicLinkPath), 0755); err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
-	tempSymbolicLinkPath := symbolicLinkPath + "." + strconv.FormatInt(now.UnixNano(), 10) + ".tmp"
+	tempSymbolicLinkPath := symbolicLinkPath + "." + strconv.FormatInt(now.UnixNano(), 36) + ".tmp"
 	if err := linker.SymlinkIfPossible(filePath, tempSymbolicLinkPath); err != nil {
 		return fmt.Errorf("create symbolic link: %w", err)
 	}
