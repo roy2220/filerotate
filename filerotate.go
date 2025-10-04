@@ -25,6 +25,11 @@ type Options struct {
 	// For example: "logs/app-%Y-%m-%d.log"
 	FilePathPattern string
 
+	// SymbolicLinkPath is the path for a symbolic link that points to the currently
+	// active log file. An empty string disables the symbolic link feature.
+	// This link is atomically updated after each file rotation.
+	SymbolicLinkPath string
+
 	// FileSizeLimit is the maximum size (in bytes) a single log file can reach
 	// before rotation occurs. A non-positive value disables size-based rotation.
 	FileSizeLimit int64
@@ -83,24 +88,40 @@ const (
 
 func defaultLogInternalError(err error) { log.Printf("filerotate internal error: %v", err) }
 
-type fileManager struct {
-	filePathPattern  *strftime.Strftime
-	fileSizeLimit    int64
-	logInternalError func(error)
-	clock            clock.Clock
-	fs               afero.Fs
-
-	lock      sync.Mutex
-	isClosed  bool
-	filePath0 string
-	fileIndex int
-	fileSize  int64
-	file      afero.File
+func (o Options) applyDefaults() Options {
+	if o.BufferSize == 0 {
+		o.BufferSize = defaultBufferSize
+	}
+	if o.LargeWriteThreshold <= 0.0 {
+		o.LargeWriteThreshold = defaultLargeWriteThreshold
+	} else if o.LargeWriteThreshold > 1.0 {
+		o.LargeWriteThreshold = 1.0
+	}
+	if o.FlushInterval <= 0 {
+		o.FlushInterval = defaultFlushInterval
+	}
+	if o.IdleBufferTimeout <= 0 {
+		o.IdleBufferTimeout = defaultIdleBufferTimeout
+	}
+	if o.LogInternalError == nil {
+		o.LogInternalError = defaultLogInternalError
+	}
+	if o.Go == nil {
+		o.Go = func(f func()) { go f() }
+	}
+	if o.Clock == nil {
+		o.Clock = clock.New()
+	}
+	if o.Fs == nil {
+		o.Fs = afero.NewOsFs()
+	}
+	return o
 }
 
 // OpenFile creates a new io.WriteCloser with file rotation and optional buffering
 // based on the provided Options.
 func OpenFile(options Options) (io.WriteCloser, error) {
+	options = options.applyDefaults()
 	if options.FilePathPattern == "" {
 		return nil, errors.New("filerotate: no file path pattern")
 	}
@@ -108,23 +129,16 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("filerotate: invalid file path pattern: %v", err)
 	}
-	if options.Go == nil {
-		options.Go = func(f func()) { go f() }
-	}
-	if options.Clock == nil {
-		options.Clock = clock.New()
-	}
-	if options.Fs == nil {
-		options.Fs = afero.NewOsFs()
-	}
+
 	wc := io.WriteCloser(&fileManager{
 		filePathPattern:  filePathPattern,
+		symbolicLinkPath: options.SymbolicLinkPath,
 		fileSizeLimit:    options.FileSizeLimit,
 		logInternalError: options.LogInternalError,
 		clock:            options.Clock,
 		fs:               options.Fs,
 	})
-	if options.BufferSize >= 0 {
+	if options.BufferSize >= 1 {
 		wc = newBufferedWriteCloser(
 			wc,
 			options.BufferSize,
@@ -139,7 +153,25 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 	return wc, nil
 }
 
+// ErrClosed is returned when an operation is attempted on a WriteCloser that has already been closed.
 var ErrClosed = errors.New("filerotate: closed")
+
+type fileManager struct {
+	filePathPattern  *strftime.Strftime
+	symbolicLinkPath string
+	fileSizeLimit    int64
+	logInternalError func(error)
+	clock            clock.Clock
+	fs               afero.Fs
+
+	lock         sync.Mutex
+	isClosed     bool
+	baseFilePath string
+	fileIndex    int
+	filePath     string
+	fileSize     int64
+	file         afero.File
+}
 
 func (m *fileManager) Write(p []byte) (int, error) {
 	m.lock.Lock()
@@ -159,12 +191,14 @@ func (m *fileManager) Write(p []byte) (int, error) {
 }
 
 func (m *fileManager) openFileLocked() error {
-	filePath0 := m.filePathPattern.FormatString(m.clock.Now())
-	if m.filePath0 != filePath0 {
+	oldFilePath := m.filePath
+	now := m.clock.Now()
+
+	if baseFilePath := m.filePathPattern.FormatString(now); m.baseFilePath != baseFilePath {
 		lastFileIndex := -1
 		var lastFilePath string
 		var lastFileInfo os.FileInfo
-		for fileIndex, filePath := 0, filePath0; ; {
+		for fileIndex, filePath := 0, baseFilePath; ; {
 			fileInfo, err := m.fs.Stat(filePath)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
@@ -174,14 +208,14 @@ func (m *fileManager) openFileLocked() error {
 			}
 			lastFileIndex, lastFilePath, lastFileInfo = fileIndex, filePath, fileInfo
 			fileIndex++
-			filePath = filePath0 + "." + strconv.Itoa(fileIndex)
+			filePath = baseFilePath + "." + strconv.Itoa(fileIndex)
 		}
 
 		var fileIndex int
 		var filePath string
 		var fileSize int64
 		if lastFileIndex == -1 {
-			filePath = filePath0
+			filePath = baseFilePath
 		} else {
 			fileIndex = lastFileIndex
 			filePath = lastFilePath
@@ -192,8 +226,9 @@ func (m *fileManager) openFileLocked() error {
 			return err
 		}
 
-		m.filePath0 = filePath0
+		m.baseFilePath = baseFilePath
 		m.fileIndex = fileIndex
+		m.filePath = filePath
 		m.fileSize = fileSize
 		if m.file != nil {
 			if err = m.file.Close(); err != nil {
@@ -205,18 +240,25 @@ func (m *fileManager) openFileLocked() error {
 
 	if m.fileSizeLimit >= 1 && m.fileSize >= m.fileSizeLimit {
 		fileIndex := m.fileIndex + 1
-		filePath := m.filePath0 + "." + strconv.Itoa(fileIndex)
+		filePath := m.baseFilePath + "." + strconv.Itoa(fileIndex)
 		file, err := m.openFile(filePath)
 		if err != nil {
 			return err
 		}
 
 		m.fileIndex = fileIndex
+		m.filePath = filePath
 		m.fileSize = 0
 		if err = m.file.Close(); err != nil {
 			m.logInternalError(fmt.Errorf("close file: %w", err))
 		}
 		m.file = file
+	}
+
+	if m.symbolicLinkPath != "" && m.filePath != oldFilePath {
+		if err := m.updateSymbolicLink(m.symbolicLinkPath, m.filePath, now); err != nil {
+			m.logInternalError(err)
+		}
 	}
 
 	return nil
@@ -231,6 +273,25 @@ func (m *fileManager) openFile(filePath string) (afero.File, error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+func (m *fileManager) updateSymbolicLink(symbolicLinkPath string, filePath string, now time.Time) error {
+	linker, ok := m.fs.(afero.Linker)
+	if !ok {
+		return fmt.Errorf("symbolic link not supported by %v", m.fs.Name())
+	}
+	if err := m.fs.MkdirAll(filepath.Dir(symbolicLinkPath), 0755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+	tempSymbolicLinkPath := symbolicLinkPath + "." + strconv.FormatInt(now.UnixNano(), 10) + ".tmp"
+	if err := linker.SymlinkIfPossible(filePath, tempSymbolicLinkPath); err != nil {
+		return fmt.Errorf("create symbolic link: %w", err)
+	}
+	if err := m.fs.Rename(tempSymbolicLinkPath, symbolicLinkPath); err != nil {
+		m.fs.Remove(tempSymbolicLinkPath)
+		return fmt.Errorf("rename symbolic link: %w", err)
+	}
+	return nil
 }
 
 func (m *fileManager) Close() error {
@@ -281,27 +342,8 @@ func newBufferedWriteCloser(
 	go1 func(func()),
 	clock clock.Clock,
 ) io.WriteCloser {
-	if bufferSize < 1 {
-		bufferSize = defaultBufferSize
-	}
-	if largeWriteThreshold <= 0.0 {
-		largeWriteThreshold = defaultLargeWriteThreshold
-	} else if largeWriteThreshold > 1.0 {
-		largeWriteThreshold = 1.0
-	}
 	minLargeWriteSize := int(math.Ceil(float64(bufferSize) * largeWriteThreshold))
-	if flushInterval < 1 {
-		flushInterval = defaultFlushInterval
-	}
-	if idleBufferTimeout < 1 {
-		idleBufferTimeout = defaultIdleBufferTimeout
-	}
-	if logInternalError == nil {
-		logInternalError = defaultLogInternalError
-	}
-
 	backgroundCtx, cancel := context.WithCancel(context.Background())
-
 	return &bufferedWriteCloser{
 		wc:                wc,
 		bufferSize:        bufferSize,

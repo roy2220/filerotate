@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -95,9 +96,10 @@ func Test_Write(t *testing.T) {
 				Clock: clock,
 				Fs:    fs,
 
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				FileSizeLimit:   6,
-				BufferSize:      -1,
+				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
+				SymbolicLinkPath: "/log/test.log",
+				FileSizeLimit:    6,
+				BufferSize:       -1,
 			})
 			require.NoError(t, err)
 			t.Cleanup(func() {
@@ -696,11 +698,13 @@ func Test_Comprehensive(t *testing.T) {
 	const M = 200
 
 	dirPath := t.TempDir()
+	symbolicLinkPath := filepath.Join(dirPath, "app.log")
 	wc, err := OpenFile(Options{
-		FilePathPattern: filepath.Join(dirPath, "%Y-%m-%d-%H-%M-%S.log"),
-		FileSizeLimit:   10000,
-		BufferSize:      100,
-		FlushInterval:   30 * time.Millisecond,
+		FilePathPattern:  filepath.Join(dirPath, "app_%Y-%m-%d-%H-%M-%S.log"),
+		SymbolicLinkPath: symbolicLinkPath,
+		FileSizeLimit:    10000,
+		BufferSize:       100,
+		FlushInterval:    30 * time.Millisecond,
 	})
 	require.NoError(t, err)
 
@@ -725,8 +729,12 @@ func Test_Comprehensive(t *testing.T) {
 	entries, err := os.ReadDir(dirPath)
 	require.NoError(t, err)
 	hash := md5.New()
+	var filePaths []string
 	for _, entry := range entries {
 		if entry.IsDir() {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		filePath := filepath.Join(dirPath, entry.Name())
@@ -736,8 +744,15 @@ func Test_Comprehensive(t *testing.T) {
 		data, err := os.ReadFile(filePath)
 		require.NoError(t, err)
 		hash.Write(data)
+		filePaths = append(filePaths, filePath)
 	}
 
 	expectedHashSum := md5.Sum(bytes.Repeat(line, N*M))
 	require.Equal(t, expectedHashSum[:], hash.Sum(nil))
+
+	sort.Strings(filePaths)
+	expectedLinkedFilePath := filePaths[len(filePaths)-1]
+	lastFilePath, err := os.Readlink(symbolicLinkPath)
+	require.NoError(t, err)
+	require.Equal(t, expectedLinkedFilePath, lastFilePath)
 }

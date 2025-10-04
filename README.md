@@ -7,6 +7,15 @@ Go package **`filerotate`** provides an `io.WriteCloser` implementation that han
 
 ---
 
+## Features
+
+* **Time-Based Rotation:** Uses `strftime` patterns (e.g., `%Y-%m-%d`) to automatically rotate files based on time.
+* **Size-Based Rotation:** Rotates files when they exceed a specified size limit, appending an index (e.g., `.1`, `.2`).
+* **High-Performance Buffering:** An optional, self-tuning write buffer that can automatically free memory when idle.
+* **Symbolic Link Tracking:** Optionally maintains a symbolic link that always points to the currently active log file.
+
+---
+
 ## Basic Usage
 
 The core functionality is accessed through the `OpenFile` function, which returns an `io.WriteCloser` that automatically manages the underlying log file.
@@ -25,8 +34,11 @@ import (
 func main() {
     options := filerotate.Options{
         // Mandatory: Use strftime format for substitution.
-        // This pattern creates a new file every day, e.g., "logs/app-2023-10-02.log"
-        FilePathPattern: "logs/app-%Y-%m-%d.log",
+        // This pattern creates a new file every day, e.g., "logs/app/2023-10-02.log"
+        FilePathPattern: "logs/app/%Y-%m-%d.log",
+
+        // Optional: Maintain a symbolic link to the currently active log file.
+        SymbolicLinkPath: "logs/app.log",
 
         // Optional: Rotate the file if it exceeds 100MB
         FileSizeLimit: 100 * 1024 * 1024,
@@ -64,7 +76,8 @@ The `filerotate.Options` struct controls both file rotation and I/O buffering.
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
-| **`FilePathPattern`** | `string` | **Mandatory.** The file naming pattern using strftime format (e.g., `"logs/app-%Y-%m-%d.log"`). Time-based rotation occurs when the current time generates a different path. |
+| **`FilePathPattern`** | `string` | **Mandatory.** The file naming pattern using strftime format (e.g., `"logs/app/%Y-%m-%d.log"`). Time-based rotation occurs when the current time generates a different path. |
+| **`SymbolicLinkPath`** | `string` | **Optional.** The path to a symbolic link that will always point to the most recently active log file. Leave empty to disable. |
 | **`FileSizeLimit`** | `int64` | The maximum size (in bytes) of a single file. Set to a non-positive value (e.g., `0`) to **disable size-based rotation**. Rotated files are appended with an index, e.g., `app-2023-10-02.log.1`, `app-2023-10-02.log.2`, etc. |
 
 ### Buffering Settings
@@ -72,14 +85,14 @@ The `filerotate.Options` struct controls both file rotation and I/O buffering.
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | **`BufferSize`** | `int` | `8MB` | The internal buffer size in bytes. Set to a **negative value (e.g., `-1`) to disable buffering**. |
-| **`LargeWriteThreshold`**| `float64`| $\approx 0.618$ | A ratio (0.0 to 1.0) of `BufferSize`. If a single write is larger than this threshold, it **bypasses the buffer** and writes directly to the file to prevent blocking the buffer with a single large operation. |
+| **`LargeWriteThreshold`**| `float64`| $\approx 0.618$ | A ratio (0.0 to 1.0) of `BufferSize`. If a single write is larger than the calculated threshold, it **bypasses the buffer** and writes directly to the file. This prevents a single large operation from blocking the buffer. |
 | **`FlushInterval`**| `time.Duration`| `1s` | How often the background routine automatically flushes the buffer to the file. |
-| **`IdleBufferTimeout`**| `time.Duration`| `3s` | The maximum time the buffer can be idle (no new writes) before the auto-flusher goroutine stops and **releases the buffer's memory** to conserve resources. It restarts automatically on the next write. |
-| **`LogInternalError`**| `func(error)` | *(Logs to standard output)* | A callback function to handle errors that occur during background operations (e.g., auto-flushing failures, file close errors). If `nil`, errors are logged using the standard `log` package. |
+| **`IdleBufferTimeout`**| `time.Duration`| `3s` | The maximum time the buffer can be idle (no new writes) before the auto-flusher goroutine stops and **releases the buffer's memory** (`nil`s the internal slice) to conserve resources. It restarts automatically on the next write. |
+| **`LogInternalError`**| `func(error)` | *(Logs to standard output)* | A callback function to handle errors that occur during background operations (e.g., auto-flushing failures, file close errors). If `nil`, a default logger that writes to standard output is used. |
 
 ### Testing Hooks
 
-The package provides hooks for dependency injection, useful for testing:
+The package provides hooks for dependency injection, useful for deterministic testing:
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
