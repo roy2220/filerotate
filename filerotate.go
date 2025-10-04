@@ -125,6 +125,17 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 	if options.FilePathPattern == "" {
 		return nil, errors.New("filerotate: no file path pattern")
 	}
+	var err error
+	options.FilePathPattern, err = filepath.Abs(options.FilePathPattern)
+	if err != nil {
+		return nil, fmt.Errorf("filerotate: get absolute path: %v", err)
+	}
+	if options.SymbolicLinkPath != "" {
+		options.SymbolicLinkPath, err = filepath.Abs(options.SymbolicLinkPath)
+		if err != nil {
+			return nil, fmt.Errorf("filerotate: get absolute path: %v", err)
+		}
+	}
 	filePathPattern, err := strftime.New(options.FilePathPattern)
 	if err != nil {
 		return nil, fmt.Errorf("filerotate: invalid file path pattern: %v", err)
