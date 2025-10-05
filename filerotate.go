@@ -158,6 +158,7 @@ func (o *Options) applyDefaults() {
 // based on the provided Options.
 func OpenFile(options Options) (io.WriteCloser, error) {
 	options.applyDefaults()
+
 	if options.FilePathPattern == "" {
 		return nil, errors.New("filerotate: no file path pattern")
 	}
@@ -409,7 +410,8 @@ func (m *fileManager) Close() error {
 
 	var err error
 	if m.file != nil {
-		if err := m.file.Close(); err != nil {
+		err = m.file.Close()
+		if err != nil {
 			err = fmt.Errorf("filerotate: close file: %w", err)
 		}
 	}
