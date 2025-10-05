@@ -18,6 +18,44 @@ import (
 	"github.com/spf13/afero"
 )
 
+const (
+	defaultBufferSize          = 8 * 1024 * 1024
+	defaultFlushInterval       = 1 * time.Second
+	defaultMaxIdleBufferAge    = 3
+	defaultLargeWriteThreshold = 1 / math.Phi
+)
+
+var (
+	defaultLogInternalError = func(err error) { log.Println(err) }
+	defaultGo               = func(f func()) { go f() }
+	defaultClock            = clock.New()
+	defaultFs               = afero.NewOsFs()
+	defaultRegistry         = &sync.Map{}
+)
+
+func init() {
+	go closeOutdatedFiles(context.Background(), defaultClock, defaultRegistry)
+}
+
+func closeOutdatedFiles(ctx context.Context, clock clock.Clock, registry *sync.Map) {
+	ticker := clock.Ticker(1 * time.Minute)
+
+	for {
+		var now time.Time
+		select {
+		case now = <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+
+		registry.Range(func(key, _ any) bool {
+			key.(*fileManager).CloseOutdatedFile(now)
+			return true
+		})
+	}
+
+}
+
 // Options defines the configuration for file rotation and buffering.
 type Options struct {
 	// FilePathPattern specifies the pattern for file naming.
@@ -79,16 +117,10 @@ type Options struct {
 	// Fs specifies the filesystem interface to use.
 	// If nil, the local OS filesystem is used.
 	Fs afero.Fs
+
+	// Registry is a pointer to a sync.Map that keeps track of internal instances.
+	Registry *sync.Map
 }
-
-const (
-	defaultBufferSize          = 8 * 1024 * 1024
-	defaultFlushInterval       = 1 * time.Second
-	defaultMaxIdleBufferAge    = 3
-	defaultLargeWriteThreshold = 1 / math.Phi
-)
-
-func defaultLogInternalError(err error) { log.Println(err) }
 
 func (o *Options) applyDefaults() {
 	if o.BufferSize == 0 {
@@ -109,13 +141,16 @@ func (o *Options) applyDefaults() {
 		o.LogInternalError = defaultLogInternalError
 	}
 	if o.Go == nil {
-		o.Go = func(f func()) { go f() }
+		o.Go = defaultGo
 	}
 	if o.Clock == nil {
-		o.Clock = clock.New()
+		o.Clock = defaultClock
 	}
 	if o.Fs == nil {
-		o.Fs = afero.NewOsFs()
+		o.Fs = defaultFs
+	}
+	if o.Registry == nil {
+		o.Registry = defaultRegistry
 	}
 }
 
@@ -142,14 +177,15 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 		return nil, fmt.Errorf("filerotate: invalid file path pattern: %w", err)
 	}
 
-	wc := io.WriteCloser(&fileManager{
-		filePathPattern:  filePathPattern,
-		symbolicLinkPath: options.SymbolicLinkPath,
-		fileSizeLimit:    options.FileSizeLimit,
-		logInternalError: options.LogInternalError,
-		clock:            options.Clock,
-		fs:               options.Fs,
-	})
+	wc := io.WriteCloser(newFileManager(
+		filePathPattern,
+		options.SymbolicLinkPath,
+		options.FileSizeLimit,
+		options.LogInternalError,
+		options.Clock,
+		options.Fs,
+		options.Registry,
+	))
 	if options.BufferSize >= 1 {
 		wc = newBufferedWriteCloser(
 			wc,
@@ -175,6 +211,7 @@ type fileManager struct {
 	logInternalError func(error)
 	clock            clock.Clock
 	fs               afero.Fs
+	registry         *sync.Map
 
 	lock         sync.Mutex
 	isClosed     bool
@@ -183,6 +220,29 @@ type fileManager struct {
 	filePath     string
 	fileSize     int64
 	file         afero.File
+	fileIsIdle   bool
+}
+
+func newFileManager(
+	filePathPattern *strftime.Strftime,
+	symbolicLinkPath string,
+	fileSizeLimit int64,
+	logInternalError func(error),
+	clock clock.Clock,
+	fs afero.Fs,
+	registry *sync.Map,
+) *fileManager {
+	m := &fileManager{
+		filePathPattern:  filePathPattern,
+		symbolicLinkPath: symbolicLinkPath,
+		fileSizeLimit:    fileSizeLimit,
+		logInternalError: logInternalError,
+		clock:            clock,
+		fs:               fs,
+		registry:         registry,
+	}
+	registry.Store(m, struct{}{})
+	return m
 }
 
 func (m *fileManager) Write(p []byte) (int, error) {
@@ -199,6 +259,7 @@ func (m *fileManager) Write(p []byte) (int, error) {
 
 	n, err := m.file.Write(p)
 	m.fileSize += int64(n)
+	m.fileIsIdle = false
 	return n, err
 }
 
@@ -306,7 +367,39 @@ func updateSymbolicLink(fs afero.Fs, symbolicLinkPath string, filePath string, n
 	return nil
 }
 
+func (m *fileManager) CloseOutdatedFile(now time.Time) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if m.isClosed {
+		return
+	}
+	if m.file == nil {
+		return
+	}
+	if !m.fileIsIdle {
+		m.fileIsIdle = true
+		return
+	}
+	if m.baseFilePath == m.filePathPattern.FormatString(now) {
+		return
+	}
+
+	if err := m.file.Close(); err != nil {
+		m.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
+	}
+
+	m.baseFilePath = ""
+	m.fileIndex = 0
+	m.filePath = ""
+	m.fileSize = 0
+	m.file = nil
+	m.fileIsIdle = false
+}
+
 func (m *fileManager) Close() error {
+	m.registry.Delete(m)
+
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
@@ -343,7 +436,6 @@ type bufferedWriteCloser struct {
 	isClosed             bool
 	hasPendingWrites     bool
 	pendingData          []byte
-	idleBufferAge        int
 	autoFlusherIsRunning bool
 }
 
@@ -402,9 +494,7 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 		wc.pendingData = make([]byte, 0, wc.bufferSize)
 	}
 	wc.pendingData = append(wc.pendingData, p...)
-	wc.idleBufferAge = 0
 	wc.runAutoFlusherLocked()
-
 	return n, nil
 }
 
@@ -429,6 +519,7 @@ func (wc *bufferedWriteCloser) autoFlush() {
 	ticker := wc.clock.Ticker(wc.flushInterval)
 	defer ticker.Stop()
 
+	idleBufferAge := 0
 	for {
 		select {
 		case <-ticker.C:
@@ -441,12 +532,13 @@ func (wc *bufferedWriteCloser) autoFlush() {
 			defer wc.lock.Unlock()
 
 			if wc.hasPendingWrites {
+				idleBufferAge = 0
 				if err := wc.flushLocked(); err != nil {
 					wc.logInternalError(err)
 				}
 			} else {
-				wc.idleBufferAge++
-				if wc.idleBufferAge > wc.maxIdleBufferAge {
+				idleBufferAge++
+				if idleBufferAge > wc.maxIdleBufferAge {
 					wc.pendingData = nil
 					wc.autoFlusherIsRunning = false
 					return false

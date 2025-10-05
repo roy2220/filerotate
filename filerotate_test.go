@@ -37,8 +37,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      -1,
@@ -93,8 +94,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
 				SymbolicLinkPath: "/log/test.log",
@@ -174,8 +176,9 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				FileSizeLimit:   6,
@@ -212,8 +215,9 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				FileSizeLimit:   6,
@@ -243,8 +247,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
@@ -294,8 +299,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          100,
@@ -326,8 +332,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          10,
@@ -369,8 +376,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          100,
@@ -404,8 +412,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
 				BufferSize:          10,
@@ -463,8 +472,9 @@ func Test_Write(t *testing.T) {
 						f()
 					}()
 				},
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
 				BufferSize:       1000,
@@ -511,8 +521,9 @@ func Test_Write(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
@@ -556,8 +567,9 @@ func Test_Close(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      -1,
@@ -584,8 +596,9 @@ func Test_Close(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
@@ -621,8 +634,9 @@ func Test_Close(t *testing.T) {
 						f()
 					}()
 				},
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
@@ -662,8 +676,9 @@ func Test_Close(t *testing.T) {
 			fs := afero.NewMemMapFs()
 
 			wc, err := OpenFile(Options{
-				Clock: clock,
-				Fs:    fs,
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
 
 				FilePathPattern: "/log/%Y-%m-%d-%H.log",
 				BufferSize:      1000,
@@ -690,6 +705,65 @@ func Test_Close(t *testing.T) {
 			require.Equal(t, "", string(data))
 		},
 	)
+}
+
+func Test_CloseOutdatedFiles(t *testing.T) {
+	clock := clock.NewMock()
+	clock.Set(time.Now())
+	fs := afero.NewMemMapFs()
+	registry := &sync.Map{}
+
+	wc, err := OpenFile(Options{
+		Clock:    clock,
+		Fs:       fs,
+		Registry: registry,
+
+		FilePathPattern: "/log/%Y-%m-%d-%H.log",
+		BufferSize:      -1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if wc != nil {
+			err := wc.Close()
+			assert.NoError(t, err)
+		}
+	})
+
+	_, err = wc.Write([]byte("hello\n"))
+	require.NoError(t, err)
+
+	n := 0
+	registry.Range(func(key, _ any) bool {
+		n++
+		require.NotEqual(t, "", key.(*FileManager).FilePath())
+		return true
+	})
+	require.Equal(t, 1, n)
+
+	go CloseOutdatedFiles(t.Context(), clock, registry)
+
+	time.Sleep(25 * time.Millisecond)
+	clock.Add(61 * time.Minute)
+	time.Sleep(100 * time.Millisecond)
+
+	n = 0
+	registry.Range(func(key, _ any) bool {
+		n++
+		require.Equal(t, "", key.(*FileManager).FilePath())
+		return true
+	})
+	require.Equal(t, 1, n)
+
+	err = wc.Close()
+	wc = nil
+	assert.NoError(t, err)
+
+	n = 0
+	registry.Range(func(key, _ any) bool {
+		n++
+		return true
+	})
+	require.Equal(t, 0, n)
 }
 
 func Test_Comprehensive(t *testing.T) {
