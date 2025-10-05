@@ -51,12 +51,14 @@ type Options struct {
 	// A non-positive value uses a default interval of 1 second.
 	FlushInterval time.Duration
 
-	// IdleBufferTimeout specifies the maximum duration the buffer can remain idle
-	// (without new writes) before the auto-flusher goroutine stops and releases
-	// the buffer memory. When the buffer has been idle for this duration, the
-	// internal buffer slice is set to nil to free memory. A non-positive value
-	// uses a default timeout of 3 seconds.
-	IdleBufferTimeout time.Duration
+	// MaxIdleBufferAge specifies the maximum number of consecutive flush intervals
+	// that the buffer can remain idle (without new writes) before the auto-flusher
+	// stops and releases the buffer memory.
+	// This mechanism prevents the buffer from consuming memory indefinitely during
+	// periods of inactivity. The auto-flusher will restart automatically on the next
+	// write operation.
+	// A non-positive value uses a default of 3.
+	MaxIdleBufferAge int
 
 	// LogInternalError specifies a callback function for handling internal errors
 	// that occur during background operations (such as auto-flushing failures or
@@ -82,7 +84,7 @@ type Options struct {
 const (
 	defaultBufferSize          = 8 * 1024 * 1024
 	defaultFlushInterval       = 1 * time.Second
-	defaultIdleBufferTimeout   = 3 * time.Second
+	defaultMaxIdleBufferAge    = 3
 	defaultLargeWriteThreshold = 1 / math.Phi
 )
 
@@ -100,8 +102,8 @@ func (o *Options) applyDefaults() {
 	if o.FlushInterval <= 0 {
 		o.FlushInterval = defaultFlushInterval
 	}
-	if o.IdleBufferTimeout <= 0 {
-		o.IdleBufferTimeout = defaultIdleBufferTimeout
+	if o.MaxIdleBufferAge <= 0 {
+		o.MaxIdleBufferAge = defaultMaxIdleBufferAge
 	}
 	if o.LogInternalError == nil {
 		o.LogInternalError = defaultLogInternalError
@@ -154,7 +156,7 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 			options.BufferSize,
 			options.LargeWriteThreshold,
 			options.FlushInterval,
-			options.IdleBufferTimeout,
+			options.MaxIdleBufferAge,
 			options.LogInternalError,
 			options.Go,
 			options.Clock,
@@ -327,7 +329,7 @@ type bufferedWriteCloser struct {
 	bufferSize        int
 	minLargeWriteSize int
 	flushInterval     time.Duration
-	idleBufferTimeout time.Duration
+	maxIdleBufferAge  int
 	logInternalError  func(error)
 	go1               func(func())
 	clock             clock.Clock
@@ -341,6 +343,7 @@ type bufferedWriteCloser struct {
 	isClosed             bool
 	hasPendingWrites     bool
 	pendingData          []byte
+	idleBufferAge        int
 	autoFlusherIsRunning bool
 }
 
@@ -349,7 +352,7 @@ func newBufferedWriteCloser(
 	bufferSize int,
 	largeWriteThreshold float64,
 	flushInterval time.Duration,
-	idleBufferTimeout time.Duration,
+	maxIdleBufferAge int,
 	logInternalError func(error),
 	go1 func(func()),
 	clock clock.Clock,
@@ -361,7 +364,7 @@ func newBufferedWriteCloser(
 		bufferSize:        bufferSize,
 		minLargeWriteSize: minLargeWriteSize,
 		flushInterval:     flushInterval,
-		idleBufferTimeout: idleBufferTimeout,
+		maxIdleBufferAge:  maxIdleBufferAge,
 		logInternalError:  logInternalError,
 		go1:               go1,
 		clock:             clock,
@@ -399,6 +402,7 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 		wc.pendingData = make([]byte, 0, wc.bufferSize)
 	}
 	wc.pendingData = append(wc.pendingData, p...)
+	wc.idleBufferAge = 0
 	wc.runAutoFlusherLocked()
 
 	return n, nil
@@ -425,11 +429,9 @@ func (wc *bufferedWriteCloser) autoFlush() {
 	ticker := wc.clock.Ticker(wc.flushInterval)
 	defer ticker.Stop()
 
-	idleBufferTime := wc.clock.Now()
 	for {
-		var now time.Time
 		select {
-		case now = <-ticker.C:
+		case <-ticker.C:
 		case <-wc.backgroundCtx.Done():
 			return
 		}
@@ -439,12 +441,12 @@ func (wc *bufferedWriteCloser) autoFlush() {
 			defer wc.lock.Unlock()
 
 			if wc.hasPendingWrites {
-				idleBufferTime = now
 				if err := wc.flushLocked(); err != nil {
 					wc.logInternalError(err)
 				}
 			} else {
-				if now.Sub(idleBufferTime) >= wc.idleBufferTimeout {
+				wc.idleBufferAge++
+				if wc.idleBufferAge > wc.maxIdleBufferAge {
 					wc.pendingData = nil
 					wc.autoFlusherIsRunning = false
 					return false
