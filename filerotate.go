@@ -214,14 +214,14 @@ type fileManager struct {
 	fs               afero.Fs
 	registry         *sync.Map
 
-	lock         sync.Mutex
-	isClosed     bool
-	baseFilePath string
-	fileIndex    int
-	filePath     string
-	fileSize     int64
-	file         afero.File
-	fileIsIdle   bool
+	lock                sync.Mutex
+	isClosed            bool
+	baseFilePath        string
+	fileIndex           int
+	filePath            string
+	fileSize            int64
+	file                afero.File
+	fileHasRecentWrites bool
 }
 
 func newFileManager(
@@ -260,7 +260,7 @@ func (m *fileManager) Write(p []byte) (int, error) {
 
 	n, err := m.file.Write(p)
 	m.fileSize += int64(n)
-	m.fileIsIdle = false
+	m.fileHasRecentWrites = true
 	return n, err
 }
 
@@ -378,8 +378,8 @@ func (m *fileManager) CloseOutdatedFile(now time.Time) {
 	if m.file == nil {
 		return
 	}
-	if !m.fileIsIdle {
-		m.fileIsIdle = true
+	if m.fileHasRecentWrites {
+		m.fileHasRecentWrites = false
 		return
 	}
 	if m.baseFilePath == m.filePathPattern.FormatString(now) {
@@ -395,7 +395,6 @@ func (m *fileManager) CloseOutdatedFile(now time.Time) {
 	m.filePath = ""
 	m.fileSize = 0
 	m.file = nil
-	m.fileIsIdle = false
 }
 
 func (m *fileManager) Close() error {
