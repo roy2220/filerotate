@@ -72,6 +72,20 @@ type Options struct {
 	// before rotation occurs. A non-positive value disables size-based rotation.
 	FileSizeLimit int64
 
+	// EnsureNewline guarantees that every write operation to the file ends with a newline
+	// character ('\n'), unless the written data already does.
+	// This option is generally more efficient when used with a buffer (BufferSize > 0),
+	// as manually appending a newline to the data before calling Write() can lead to
+	// redundant memory allocation and copying.
+	EnsureNewline bool
+
+	// LogInternalError specifies a callback function for handling internal errors
+	// that occur during background operations (such as auto-flushing failures or
+	// file close errors). These errors cannot be returned to the caller directly
+	// since they happen asynchronously. If nil, a default logger is used that
+	// writes to the standard log.
+	LogInternalError func(error)
+
 	// The options below serve for buffering.
 
 	// BufferSize is the size (in bytes) of the internal buffer.
@@ -97,13 +111,6 @@ type Options struct {
 	// write operation.
 	// A non-positive value uses a default of 3.
 	MaxIdleBufferAge int
-
-	// LogInternalError specifies a callback function for handling internal errors
-	// that occur during background operations (such as auto-flushing failures or
-	// file close errors). These errors cannot be returned to the caller directly
-	// since they happen asynchronously. If nil, a default logger is used that
-	// writes to the standard log.
-	LogInternalError func(error)
 
 	// The options below serve for testing.
 
@@ -182,6 +189,7 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 		filePathPattern,
 		options.SymbolicLinkPath,
 		options.FileSizeLimit,
+		options.EnsureNewline,
 		options.LogInternalError,
 		options.Clock,
 		options.Fs,
@@ -194,6 +202,7 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 			options.LargeWriteThreshold,
 			options.FlushInterval,
 			options.MaxIdleBufferAge,
+			options.EnsureNewline,
 			options.LogInternalError,
 			options.Go,
 			options.Clock,
@@ -209,6 +218,7 @@ type fileManager struct {
 	filePathPattern  *strftime.Strftime
 	symbolicLinkPath string
 	fileSizeLimit    int64
+	ensureNewline    bool
 	logInternalError func(error)
 	clock            clock.Clock
 	fs               afero.Fs
@@ -228,6 +238,7 @@ func newFileManager(
 	filePathPattern *strftime.Strftime,
 	symbolicLinkPath string,
 	fileSizeLimit int64,
+	ensureNewline bool,
 	logInternalError func(error),
 	clock clock.Clock,
 	fs afero.Fs,
@@ -237,6 +248,7 @@ func newFileManager(
 		filePathPattern:  filePathPattern,
 		symbolicLinkPath: symbolicLinkPath,
 		fileSizeLimit:    fileSizeLimit,
+		ensureNewline:    ensureNewline,
 		logInternalError: logInternalError,
 		clock:            clock,
 		fs:               fs,
@@ -260,6 +272,11 @@ func (m *fileManager) Write(p []byte) (int, error) {
 
 	n, err := m.file.Write(p)
 	m.fileSize += int64(n)
+	if m.ensureNewline && err == nil && !(n >= 1 && p[n-1] == '\n') {
+		var n2 int
+		n2, err = m.file.Write([]byte{'\n'})
+		m.fileSize += int64(n2)
+	}
 	m.fileHasRecentWrites = true
 	return n, err
 }
@@ -424,6 +441,7 @@ type bufferedWriteCloser struct {
 	minLargeWriteSize int
 	flushInterval     time.Duration
 	maxIdleBufferAge  int
+	ensureNewline     bool
 	logInternalError  func(error)
 	go1               func(func())
 	clock             clock.Clock
@@ -446,6 +464,7 @@ func newBufferedWriteCloser(
 	largeWriteThreshold float64,
 	flushInterval time.Duration,
 	maxIdleBufferAge int,
+	ensureNewline bool,
 	logInternalError func(error),
 	go1 func(func()),
 	clock clock.Clock,
@@ -457,6 +476,7 @@ func newBufferedWriteCloser(
 		bufferSize:        bufferSize,
 		minLargeWriteSize: minLargeWriteSize,
 		flushInterval:     flushInterval,
+		ensureNewline:     ensureNewline,
 		maxIdleBufferAge:  maxIdleBufferAge,
 		logInternalError:  logInternalError,
 		go1:               go1,
@@ -495,6 +515,9 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 		wc.pendingData = make([]byte, 0, wc.bufferSize)
 	}
 	wc.pendingData = append(wc.pendingData, p...)
+	if wc.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
+		wc.pendingData = append(wc.pendingData, '\n')
+	}
 	wc.runAutoFlusherLocked()
 	return n, nil
 }

@@ -552,6 +552,47 @@ func Test_Write(t *testing.T) {
 			require.Equal(t, "", string(data))
 		},
 	)
+
+	t.Run(
+		"writes data to the file and ensures newline",
+		func(t *testing.T) {
+			clock := clock.NewMock()
+			clock.Set(t0)
+			fs := afero.NewMemMapFs()
+
+			wc, err := OpenFile(Options{
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
+
+				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
+				BufferSize:          10,
+				LargeWriteThreshold: 0.6,
+				EnsureNewline:       true,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				err := wc.Close()
+				assert.NoError(t, err)
+			})
+
+			n, err := wc.Write([]byte("abc"))
+			require.NoError(t, err)
+			require.Equal(t, 3, n)
+
+			n, err = wc.Write([]byte("def"))
+			require.NoError(t, err)
+			require.Equal(t, 3, n)
+
+			n, err = wc.Write([]byte("123456"))
+			require.NoError(t, err)
+			require.Equal(t, 6, n)
+
+			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
+			require.NoError(t, err)
+			require.Equal(t, "abc\ndef\n123456\n", string(data))
+		},
+	)
 }
 
 func Test_Close(t *testing.T) {
