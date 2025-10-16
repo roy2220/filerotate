@@ -258,6 +258,8 @@ func newFileManager(
 	return m
 }
 
+var bufferPool = sync.Pool{New: func() any { return []byte(nil) }}
+
 func (m *fileManager) Write(p []byte) (int, error) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
@@ -270,13 +272,21 @@ func (m *fileManager) Write(p []byte) (int, error) {
 		return 0, err
 	}
 
-	n, err := m.file.Write(p)
-	m.fileSize += int64(n)
-	if m.ensureNewline && err == nil && !(n >= 1 && p[n-1] == '\n') {
-		var n2 int
-		n2, err = m.file.Write([]byte{'\n'})
-		m.fileSize += int64(n2)
+	n := len(p)
+	var nn int
+	var err error
+	if m.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
+		buffer := bufferPool.Get().([]byte)
+		buffer = append(buffer, p...)
+		buffer = append(buffer, '\n')
+		nn, err = m.file.Write(buffer)
+		bufferPool.Put(buffer)
+		n = min(n, nn)
+	} else {
+		nn, err = m.file.Write(p)
+		n = nn
 	}
+	m.fileSize += int64(nn)
 	m.fileHasRecentWrites = true
 	return n, err
 }
