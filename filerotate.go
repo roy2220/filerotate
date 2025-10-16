@@ -276,7 +276,7 @@ func (m *fileManager) Write(p []byte) (int, error) {
 	var nn int
 	var err error
 	if m.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
-		buffer := bufferPool.Get().([]byte)
+		buffer := bufferPool.Get().([]byte)[:0]
 		buffer = append(buffer, p...)
 		buffer = append(buffer, '\n')
 		nn, err = m.file.Write(buffer)

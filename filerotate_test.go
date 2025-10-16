@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/benbjohnson/clock"
-	"github.com/roy2220/filerotate"
 	. "github.com/roy2220/filerotate"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
@@ -20,7 +19,7 @@ import (
 )
 
 func Test_OpenFile(t *testing.T) {
-	_, err := OpenFile(filerotate.Options{})
+	_, err := OpenFile(Options{})
 	require.ErrorContains(t, err, "no file path pattern")
 }
 
@@ -588,9 +587,13 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 6, n)
 
+			n, err = wc.Write([]byte("000000"))
+			require.NoError(t, err)
+			require.Equal(t, 6, n)
+
 			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
 			require.NoError(t, err)
-			require.Equal(t, "abc\ndef\n123456\n", string(data))
+			require.Equal(t, "abc\ndef\n123456\n000000\n", string(data))
 		},
 	)
 }
