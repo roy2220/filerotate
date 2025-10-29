@@ -61,10 +61,6 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 4, n)
 
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\ndef\n", string(data))
-
 			clock.Add(time.Hour)
 
 			n, err = wc.Write([]byte("ghi\n"))
@@ -79,9 +75,28 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 4, n)
 
+			clock.Add(time.Hour)
+
+			err = afero.WriteFile(fs, "/log/2001-02-03-06.log", nil, 0644)
+			require.NoError(t, err)
+			err = afero.WriteFile(fs, "/log/2001-02-03-06.log.1", nil, 0644)
+			require.NoError(t, err)
+
+			n, err = wc.Write([]byte("mno\n"))
+			require.NoError(t, err)
+			require.Equal(t, 4, n)
+
+			data, err = afero.ReadFile(fs, "/log/2001-02-03-04.log")
+			require.NoError(t, err)
+			require.Equal(t, "abc\ndef\n", string(data))
+
 			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log")
 			require.NoError(t, err)
 			require.Equal(t, "ghi\njkl\n", string(data))
+
+			data, err = afero.ReadFile(fs, "/log/2001-02-03-06.log.2")
+			require.NoError(t, err)
+			require.Equal(t, "mno\n", string(data))
 		},
 	)
 
@@ -134,6 +149,11 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 7, n)
 
+			err = afero.WriteFile(fs, "/log/2001-02-03-05.log.2", nil, 0644)
+			require.NoError(t, err)
+			err = afero.WriteFile(fs, "/log/2001-02-03-05.log.3", nil, 0644)
+			require.NoError(t, err)
+
 			n, err = wc.Write([]byte("zzz\n"))
 			require.NoError(t, err)
 			require.Equal(t, 4, n)
@@ -154,7 +174,7 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "stuvwx\n", string(data))
 
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log.2")
+			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log.4")
 			require.NoError(t, err)
 			require.Equal(t, "zzz\n", string(data))
 		},

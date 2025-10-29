@@ -268,7 +268,7 @@ func (m *fileManager) Write(p []byte) (int, error) {
 		return 0, ErrClosed
 	}
 
-	if err := m.openFileLocked(); err != nil {
+	if err := m.rotateFileIfNeeded(); err != nil {
 		return 0, err
 	}
 
@@ -291,69 +291,22 @@ func (m *fileManager) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (m *fileManager) openFileLocked() error {
+func (m *fileManager) rotateFileIfNeeded() error {
 	oldFilePath := m.filePath
 	now := m.clock.Now()
 
-	if baseFilePath := m.filePathPattern.FormatString(now); m.baseFilePath != baseFilePath {
-		lastFileIndex := -1
-		var lastFilePath string
-		var lastFileInfo os.FileInfo
-		for fileIndex, filePath := 0, baseFilePath; ; {
-			fileInfo, err := m.fs.Stat(filePath)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					break
-				}
-				return fmt.Errorf("filerotate: get file info: %w", err)
-			}
-			lastFileIndex, lastFilePath, lastFileInfo = fileIndex, filePath, fileInfo
-			fileIndex++
-			filePath = baseFilePath + "." + strconv.Itoa(fileIndex)
-		}
-
-		var fileIndex int
-		var filePath string
-		var fileSize int64
-		if lastFileIndex == -1 {
-			filePath = baseFilePath
-		} else {
-			fileIndex = lastFileIndex
-			filePath = lastFilePath
-			fileSize = lastFileInfo.Size()
-		}
-		file, err := openFile(m.fs, filePath)
-		if err != nil {
+	if m.file == nil {
+		if err := m.openLastFile(now); err != nil {
 			return err
 		}
-
-		m.baseFilePath = baseFilePath
-		m.fileIndex = fileIndex
-		m.filePath = filePath
-		m.fileSize = fileSize
-		if m.file != nil {
-			if err := m.file.Close(); err != nil {
-				m.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
-			}
+	} else {
+		if err := m.rotateFileForTimeIfNeeded(now); err != nil {
+			return err
 		}
-		m.file = file
 	}
 
-	if m.fileSizeLimit >= 1 && m.fileSize >= m.fileSizeLimit {
-		fileIndex := m.fileIndex + 1
-		filePath := m.baseFilePath + "." + strconv.Itoa(fileIndex)
-		file, err := openFile(m.fs, filePath)
-		if err != nil {
-			return err
-		}
-
-		m.fileIndex = fileIndex
-		m.filePath = filePath
-		m.fileSize = 0
-		if err := m.file.Close(); err != nil {
-			m.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
-		}
-		m.file = file
+	if err := m.rotateFileForSizeIfNeeded(); err != nil {
+		return err
 	}
 
 	if m.symbolicLinkPath != "" && m.filePath != oldFilePath {
@@ -365,11 +318,111 @@ func (m *fileManager) openFileLocked() error {
 	return nil
 }
 
-func openFile(fs afero.Fs, filePath string) (afero.File, error) {
+func (m *fileManager) openLastFile(now time.Time) error {
+	baseFilePath := m.filePathPattern.FormatString(now)
+	lastFileIndex := 0
+	lastFilePath := baseFilePath
+	var lastFileSize int64
+	for curFileIndex, curFilePath := 0, baseFilePath; ; {
+		curFileInfo, err := m.fs.Stat(curFilePath)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("filerotate: get file info: %w", err)
+			}
+			break
+		}
+		lastFileIndex, lastFilePath, lastFileSize = curFileIndex, curFilePath, curFileInfo.Size()
+		curFileIndex++
+		curFilePath = baseFilePath + "." + strconv.Itoa(curFileIndex)
+	}
+	lastFile, err := openFile(m.fs, lastFilePath, false)
+	if err != nil {
+		return err
+	}
+
+	m.baseFilePath = baseFilePath
+	m.fileIndex = lastFileIndex
+	m.filePath = lastFilePath
+	m.fileSize = lastFileSize
+	m.file = lastFile
+	return nil
+}
+
+func (m *fileManager) rotateFileForTimeIfNeeded(now time.Time) error {
+	baseFilePath := m.filePathPattern.FormatString(now)
+	if m.baseFilePath == baseFilePath {
+		return nil
+	}
+
+	fileIndex := 0
+	filePath := baseFilePath
+	var file afero.File
+	for {
+		var err error
+		file, err = openFile(m.fs, filePath, true)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		// file already exists, that is unexpected, just try next index
+		fileIndex++
+		filePath = baseFilePath + "." + strconv.Itoa(fileIndex)
+	}
+
+	m.baseFilePath = baseFilePath
+	m.fileIndex = fileIndex
+	m.filePath = filePath
+	m.fileSize = 0
+	if err := m.file.Close(); err != nil {
+		m.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
+	}
+	m.file = file
+	return nil
+}
+
+func (m *fileManager) rotateFileForSizeIfNeeded() error {
+	if !(m.fileSizeLimit >= 1 && m.fileSize >= m.fileSizeLimit) {
+		return nil
+	}
+
+	fileIndex := m.fileIndex + 1
+	var filePath string
+	var file afero.File
+	for {
+		filePath = m.baseFilePath + "." + strconv.Itoa(fileIndex)
+		var err error
+		file, err = openFile(m.fs, filePath, true)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		// file already exists, that is unexpected, just try next index
+		fileIndex++
+	}
+
+	m.fileIndex = fileIndex
+	m.filePath = filePath
+	m.fileSize = 0
+	if err := m.file.Close(); err != nil {
+		m.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
+	}
+	m.file = file
+	return nil
+}
+
+func openFile(fs afero.Fs, filePath string, ensureNewFile bool) (afero.File, error) {
 	if err := fs.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return nil, fmt.Errorf("filerotate: create directory: %w", err)
 	}
-	file, err := fs.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	flag := os.O_WRONLY | os.O_CREATE | os.O_APPEND
+	if ensureNewFile {
+		flag |= os.O_EXCL
+	}
+	file, err := fs.OpenFile(filePath, flag, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("filerotate: open file: %w", err)
 	}
@@ -511,7 +564,7 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 		}
 	} else { // remaining buffer space is insufficient
 		if len(wc.pendingData) >= 1 {
-			if err := wc.flushLocked(); err != nil {
+			if err := wc.flush(); err != nil {
 				return 0, err
 			}
 		}
@@ -528,15 +581,15 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 	if wc.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
 		wc.pendingData = append(wc.pendingData, '\n')
 	}
-	wc.runAutoFlusherLocked()
+	wc.runAutoFlusherIfNeeded()
 	return n, nil
 }
 
-func (wc *bufferedWriteCloser) runAutoFlusherLocked() {
-	if wc.isClosing {
+func (wc *bufferedWriteCloser) runAutoFlusherIfNeeded() {
+	if wc.autoFlusherIsRunning {
 		return
 	}
-	if wc.autoFlusherIsRunning {
+	if wc.isClosing {
 		return
 	}
 
@@ -567,7 +620,7 @@ func (wc *bufferedWriteCloser) autoFlush() {
 
 			if wc.hasPendingWrites {
 				idleBufferAge = 0
-				if err := wc.flushLocked(); err != nil {
+				if err := wc.flush(); err != nil {
 					wc.logInternalError(err)
 				}
 			} else {
@@ -585,7 +638,7 @@ func (wc *bufferedWriteCloser) autoFlush() {
 	}
 }
 
-func (wc *bufferedWriteCloser) flushLocked() error {
+func (wc *bufferedWriteCloser) flush() error {
 	n, err := wc.wc.Write(wc.pendingData)
 	if err != nil {
 		if n >= 1 {
@@ -617,7 +670,7 @@ func (wc *bufferedWriteCloser) Close() error {
 
 	var err1 error
 	if wc.hasPendingWrites {
-		err1 = wc.flushLocked()
+		err1 = wc.flush()
 		wc.pendingData = nil
 	}
 
