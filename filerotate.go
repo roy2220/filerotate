@@ -258,7 +258,7 @@ func newFileManager(
 	return m
 }
 
-var bufferPool = sync.Pool{New: func() any { return []byte(nil) }}
+var bufferPool = sync.Pool{New: func() any { return new([]byte) }}
 
 func (m *fileManager) Write(p []byte) (int, error) {
 	m.lock.Lock()
@@ -276,10 +276,11 @@ func (m *fileManager) Write(p []byte) (int, error) {
 	var nn int
 	var err error
 	if m.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
-		buffer := bufferPool.Get().([]byte)[:0]
-		buffer = append(buffer, p...)
-		buffer = append(buffer, '\n')
-		nn, err = m.file.Write(buffer)
+		buffer := bufferPool.Get().(*[]byte)
+		*buffer = (*buffer)[:0]
+		*buffer = append(*buffer, p...)
+		*buffer = append(*buffer, '\n')
+		nn, err = m.file.Write(*buffer)
 		bufferPool.Put(buffer)
 		n = min(n, nn)
 	} else {
@@ -506,7 +507,7 @@ type bufferedWriteCloser struct {
 	maxIdleBufferAge  int
 	ensureNewline     bool
 	logInternalError  func(error)
-	go1               func(func())
+	go_               func(func())
 	clock             clock.Clock
 
 	backgroundCtx context.Context
@@ -529,7 +530,7 @@ func newBufferedWriteCloser(
 	maxIdleBufferAge int,
 	ensureNewline bool,
 	logInternalError func(error),
-	go1 func(func()),
+	go_ func(func()),
 	clock clock.Clock,
 ) io.WriteCloser {
 	minLargeWriteSize := int(math.Ceil(float64(bufferSize) * largeWriteThreshold))
@@ -542,7 +543,7 @@ func newBufferedWriteCloser(
 		ensureNewline:     ensureNewline,
 		maxIdleBufferAge:  maxIdleBufferAge,
 		logInternalError:  logInternalError,
-		go1:               go1,
+		go_:               go_,
 		clock:             clock,
 		backgroundCtx:     backgroundCtx,
 		cancel:            cancel,
@@ -558,8 +559,16 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 	}
 
 	n := len(p)
-	if n <= wc.bufferSize-len(wc.pendingData) { // remaining buffer space is sufficient
-		if len(wc.pendingData) == 0 && n >= wc.minLargeWriteSize {
+	appendNewline := wc.ensureNewline && !(n >= 1 && p[n-1] == '\n')
+	var nn int
+	if appendNewline {
+		nn = n + 1
+	} else {
+		nn = n
+	}
+
+	if nn <= wc.bufferSize-len(wc.pendingData) { // remaining buffer space is sufficient
+		if len(wc.pendingData) == 0 && nn >= wc.minLargeWriteSize {
 			return wc.wc.Write(p)
 		}
 	} else { // remaining buffer space is insufficient
@@ -568,7 +577,7 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 				return 0, err
 			}
 		}
-		if n >= wc.minLargeWriteSize {
+		if nn >= wc.minLargeWriteSize {
 			return wc.wc.Write(p)
 		}
 	}
@@ -578,9 +587,10 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 		wc.pendingData = make([]byte, 0, wc.bufferSize)
 	}
 	wc.pendingData = append(wc.pendingData, p...)
-	if wc.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
+	if appendNewline {
 		wc.pendingData = append(wc.pendingData, '\n')
 	}
+
 	wc.runAutoFlusherIfNeeded()
 	return n, nil
 }
@@ -594,7 +604,7 @@ func (wc *bufferedWriteCloser) runAutoFlusherIfNeeded() {
 	}
 
 	wc.wg.Add(1)
-	wc.go1(func() {
+	wc.go_(func() {
 		defer wc.wg.Done()
 
 		wc.autoFlush()
