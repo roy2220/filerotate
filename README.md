@@ -5,6 +5,9 @@
 
 Go package **`filerotate`** provides an `io.WriteCloser` implementation that handles **time-based and size-based file rotation**, optionally combined with a **self-managing, high-performance write buffer**.
 
+> [!NOTE]
+> Except for the documentation, every line of code is human-crafted. **No AI slop included**.
+
 ---
 
 ## Features
