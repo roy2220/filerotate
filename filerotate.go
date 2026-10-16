@@ -61,58 +61,58 @@ func closeOutdatedFiles(ctx context.Context, clock clock.Clock, registry *sync.M
 
 // Options defines the configuration for file rotation and buffering.
 type Options struct {
-	// FilePathPattern specifies the pattern for file naming.
-	// It uses strftime format for date/time substitution.
-	// For example: "logs/app-%Y-%m-%d.log"
+	// FilePathPattern specifies the pattern for file naming. It
+	// uses strftime format for date/time substitution. For example:
+	// "logs/app-%Y-%m-%d.log"
 	FilePathPattern string
 
-	// SymbolicLinkPath is the path for a symbolic link that points to the currently
-	// active log file. An empty string disables the symbolic link feature.
-	// This link is atomically updated after each file rotation.
+	// SymbolicLinkPath is the path for a symbolic link that points to the
+	// currently active log file. An empty string disables the symbolic link
+	// feature. This link is atomically updated after each file rotation.
 	SymbolicLinkPath string
 
-	// FileSizeLimit is the maximum size (in bytes) a single log file can reach
-	// before rotation occurs. A non-positive value disables size-based rotation.
+	// FileSizeLimit is the maximum size (in bytes) a single log file
+	// can reach before rotation occurs. A non-positive value disables
+	// size-based rotation.
 	FileSizeLimit int64
 
-	// EnsureNewline guarantees that every write operation to the file ends with a newline
-	// character ('\n'), unless the written data already does.
-	// This option is generally more efficient when used with a buffer (BufferSize > 0),
-	// as manually appending a newline to the data before calling Write() can lead to
-	// redundant memory allocation and copying.
+	// EnsureNewline guarantees that every write operation to the file ends
+	// with a newline character ('\n'), unless the written data already
+	// does. This option is generally more efficient when used with a buffer
+	// (BufferSize > 0), as manually appending a newline to the data before
+	// calling Write() can lead to redundant memory allocation and copying.
 	EnsureNewline bool
 
-	// LogInternalError specifies a callback function for handling internal errors
-	// that occur during background operations (such as auto-flushing failures or
-	// file close errors). These errors cannot be returned to the caller directly
-	// since they happen asynchronously. If nil, a default logger is used that
-	// writes to the standard log.
+	// LogInternalError specifies a callback function for handling internal
+	// errors that occur during background operations (such as auto-flushing
+	// failures or file close errors). These errors cannot be returned to
+	// the caller directly since they happen asynchronously. If nil, a
+	// default logger is used that writes to the standard log.
 	LogInternalError func(error)
 
 	// The options below serve for buffering.
 
-	// BufferSize is the size (in bytes) of the internal buffer.
-	// A zero value uses a default size of 8MB.
-	// If a buffered writer is not desired, set it to a negative value (e.g., -1).
+	// BufferSize is the size (in bytes) of the internal buffer. A zero
+	// value uses a default size of 8MB If a buffered writer is not desired,
+	// set it to a negative value (e.g., -1).
 	BufferSize int
 
-	// LargeWriteThreshold is a ratio (0.0 to 1.0) of BufferSize.
-	// If a single write operation is larger than this threshold, it will bypass the buffer
-	// and write directly to the underlying file.
-	// A non-positive value uses a default threshold based on the golden ratio (0.618).
+	// LargeWriteThreshold is a ratio (0.0 to 1.0) of BufferSize. If a
+	// single write operation is larger than this threshold, it will bypass
+	// the buffer and write directly to the underlying file. A non-positive
+	// value uses a default threshold based on the golden ratio (0.618).
 	LargeWriteThreshold float64
 
-	// FlushInterval specifies how often the buffer should be automatically flushed.
-	// A non-positive value uses a default interval of 1 second.
+	// FlushInterval specifies how often the buffer should be automatically
+	// flushed. A non-positive value uses a default interval of 1 second.
 	FlushInterval time.Duration
 
-	// MaxIdleBufferAge specifies the maximum number of consecutive flush intervals
-	// that the buffer can remain idle (without new writes) before the auto-flusher
-	// stops and releases the buffer memory.
-	// This mechanism prevents the buffer from consuming memory indefinitely during
-	// periods of inactivity. The auto-flusher will restart automatically on the next
-	// write operation.
-	// A non-positive value uses a default of 3.
+	// MaxIdleBufferAge specifies the maximum number of consecutive flush
+	// intervals that the buffer can remain idle (without new writes) before
+	// the auto-flusher stops and releases the buffer memory. This mechanism
+	// prevents the buffer from consuming memory indefinitely during periods
+	// of inactivity. The auto-flusher will restart automatically on the
+	// next write operation. A non-positive value uses a default of 3.
 	MaxIdleBufferAge int
 
 	// The options below serve for testing.
@@ -120,15 +120,16 @@ type Options struct {
 	// Go specifies the function to use for starting background goroutines.
 	Go func(func())
 
-	// Clock specifies the clock interface to use for time-related operations.
-	// If nil, the real system clock is used.
+	// Clock specifies the clock interface to use for time-related
+	// operations. If nil, the real system clock is used.
 	Clock clock.Clock
 
-	// Fs specifies the filesystem interface to use.
-	// If nil, the local OS filesystem is used.
+	// Fs specifies the filesystem interface to use. If nil, the local OS
+	// filesystem is used.
 	Fs afero.Fs
 
-	// Registry is a pointer to a sync.Map that keeps track of internal instances.
+	// Registry is a pointer to a sync.Map that keeps track of internal
+	// instances.
 	Registry *sync.Map
 }
 
@@ -164,8 +165,8 @@ func (o *Options) applyDefaults() {
 	}
 }
 
-// OpenFile creates a new io.WriteCloser with file rotation and optional buffering
-// based on the provided Options.
+// OpenFile creates a new io.WriteCloser with file rotation and optional
+// buffering based on the provided Options.
 func OpenFile(options Options) (io.WriteCloser, error) {
 	options.applyDefaults()
 
@@ -215,7 +216,8 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 	return wc, nil
 }
 
-// ErrClosed is returned when an operation is attempted on a WriteCloser that has already been closed.
+// ErrClosed is returned when an operation is attempted on a WriteCloser that
+// has already been closed.
 var ErrClosed = errors.New("filerotate: closed")
 
 type fileManager struct {
