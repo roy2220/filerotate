@@ -1,3 +1,6 @@
+// Package filerotate provides an io.WriteCloser implementation that handles
+// time-based and size-based file rotation, optionally combined with a
+// self-managing, high-performance write buffer.
 package filerotate
 
 import (
@@ -33,9 +36,9 @@ var (
 	defaultRegistry         = &sync.Map{}
 )
 
-func init() {
+var initOnce = sync.OnceFunc(func() {
 	go closeOutdatedFiles(context.Background(), defaultClock, defaultRegistry)
-}
+})
 
 func closeOutdatedFiles(ctx context.Context, clock clock.Clock, registry *sync.Map) {
 	ticker := clock.Ticker(1 * time.Minute)
@@ -208,6 +211,7 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 			options.Clock,
 		)
 	}
+	initOnce()
 	return wc, nil
 }
 
