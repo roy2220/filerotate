@@ -3,7 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/roy2220/filerotate.svg)](https://pkg.go.dev/github.com/roy2220/filerotate)
 [![Coverage](./.badges/coverage.svg)](#)
 
-Go package **`filerotate`** provides an `io.WriteCloser` implementation that handles **time-based and size-based file rotation**, optionally combined with a **self-managing, high-performance write buffer**.
+Go package **`filerotate`** provides an `io.WriteCloser` that handles **time-based and size-based file rotation**, optionally combined with a **self-managing write buffer**.
 
 > [!NOTE]
 > Except for the documentation, every line of code is human-crafted. **No AI slop included**.
@@ -12,103 +12,100 @@ Go package **`filerotate`** provides an `io.WriteCloser` implementation that han
 
 ## Features
 
-* **Time-Based Rotation:** Uses **`strftime`** patterns (e.g., `%Y-%m-%d`) to automatically rotate files based on time.
-* **Size-Based Rotation:** Rotates files when they exceed a specified size limit, appending an index (e.g., `.1`, `.2`).
-* **High-Performance Buffering:** An optional, self-tuning write buffer that can automatically release memory when writes stop.
-* **Symbolic Link Tracking:** Optionally maintains a symbolic link that always points to the currently active log file.
+* **Time-based rotation:** `strftime` patterns (e.g., `%Y-%m-%d`) decide the file name.
+* **Size-based rotation:** Starts a new file once the size limit is reached, appending an index (`.1`, `.2`, ...).
+* **Buffering:** Optional write buffer; its memory is released automatically when writes stop.
+* **Resume after restart:** If files for the current period already exist (`app.log`, `app.log.1`, `app.log.2`, ...), the latest one is reopened in append mode instead of creating a new file.
+* **Symbolic link:** Optionally points to the active file.
+* **Newline handling:** Optionally appends `\n` to writes that lack one, optimized with `writev(2)` to avoid extra copying.
+
+## Why a self-managing write buffer matters
+
+Wrapping a `bufio.Writer` around a rotating file looks simple, but it breaks
+down in one important case: when the buffer fills up, `bufio.Writer` may split a
+single log line across two flushes. If a rotation happens in between, the head
+of the line ends up in one file and the tail in the next.
+
+The built-in buffer avoids this. It flushes whole writes only and checks for
+rotation between them, so a log line is never cut into two files. It also
+flushes periodically, is safe for concurrent use, and releases its memory when
+idle.
 
 ---
 
-## Basic Usage
-
-The core functionality is accessed through the `OpenFile` function, which returns an `io.WriteCloser` that automatically manages the underlying log file.
+## Usage
 
 ```go
 package main
 
 import (
     "fmt"
-    "io"
     "time"
 
     "github.com/roy2220/filerotate"
 )
 
 func main() {
-    options := filerotate.Options{
-        // Mandatory: Use strftime format for date/time substitution.
-        // This pattern creates a new file every day, e.g., "logs/app/2023-10-02.log"
+    wc, err := filerotate.OpenFile(filerotate.Options{
+        // Mandatory. One file per day, e.g. "logs/app/2023-10-02.log".
         FilePathPattern: "logs/app/%Y-%m-%d.log",
 
-        // Optional: Maintain a symbolic link to the currently active log file.
+        // Optional: a symbolic link that always points to the active file
+        // (by its absolute path).
         SymbolicLinkPath: "logs/app.log",
 
-        // Optional: Rotate the file if it exceeds 100MB
+        // Optional: rotate once a file reaches 100MiB.
         FileSizeLimit: 100 * 1024 * 1024,
 
-        // Optional: Ensure every write ends with a newline.
+        // Optional: append '\n' to writes that lack one (optimized, no extra copying).
         EnsureNewline: true,
 
-        // Optional: Enable buffering (default 8MB for 0 value)
-        // Set to a negative value (e.g., -1) to disable buffering.
-        BufferSize: 8 * 1024 * 1024,
-    }
+        // Optional: buffer size (default 1MiB; negative disables buffering).
+        BufferSize: 256 * 1024,
+    })
+    if err != nil { /* Handle err */ }
 
-    wc, err := filerotate.OpenFile(options)
-    if err != nil {
-        panic(err)
-    }
-    defer wc.Close()
+    defer func() {
+        // Close flushes buffered data, so its error matters.
+        err := wc.Close()
+        if err != nil { /* Handle err */ }
+    }()
 
-    // Use it like any standard io.Writer
-    for i := 0; i < 1000; i++ {
-        _, err := wc.Write([]byte(fmt.Sprintf("Log entry %d at %s", i, time.Now().Format(time.RFC3339))))
-        if err != nil {
-            fmt.Println("Write error:", err)
-            break
-        }
-        time.Sleep(10 * time.Millisecond)
+    for i := 0; i < 100; i++ {
+        // No trailing "\n" needed: EnsureNewline adds it.
+        _, err := fmt.Fprintf(wc, "Log entry %d at %s", i, time.Now().Format(time.RFC3339))
+        if err != nil { /* Handle err */ }
     }
 }
 ```
 
------
+Always call `Close` when you are done: it flushes buffered data and releases
+resources. A writer that is never closed may lose buffered data.
 
-## Configuration (`Options`)
+---
 
-The `filerotate.Options` struct controls both file rotation and I/O buffering.
+## Options
 
-### File Rotation Settings
+### General
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
-| **`FilePathPattern`** | `string` | **Mandatory.** The file naming pattern using **`strftime`** format (e.g., `"logs/app/%Y-%m-%d.log"`). Time-based rotation occurs when the current time generates a different path. |
-| **`SymbolicLinkPath`** | `string` | **Optional.** The path to a symbolic link that will always point to the most recently active log file. Leave empty to disable. |
-| **`FileSizeLimit`** | `int64` | The maximum size (in bytes) of a single file. Set to a non-positive value (e.g., `0`) to **disable size-based rotation**. Rotated files are appended with an index, e.g., `app-2023-10-02.log.1`, `app-2023-10-02.log.2`, etc. |
-| **`EnsureNewline`** | `bool` | If `true`, a newline character (`\n`) is appended to every write operation, unless the written data already ends with one. This is generally most efficient when buffering is enabled (`BufferSize >= 1`). |
-| **`LogInternalError`**| `func(error)` | A callback function to handle errors that occur during background operations (e.g., auto-flushing failures, file close errors). If `nil`, a default logger that writes to standard output is used. |
+| `FilePathPattern` | `string` | **Mandatory.** `strftime` pattern for the file path. A new file is used whenever the rendered path changes. Missing directories are created automatically. |
+| `SymbolicLinkPath` | `string` | Path of a symbolic link that always points to the active file. Empty disables it. |
+| `FileSizeLimit` | `int64` | Size in bytes after which writes go to a new file. A file may slightly exceed it. Zero or negative disables size-based rotation. |
+| `EnsureNewline` | `bool` | Append `\n` to each write unless it already ends with one. This costs almost nothing: the newline may be gathered with the data via `writev(2)`. |
+| `LogInternalError` | `func(error)` | Called with errors that cannot be returned to the caller, such as background flush failures. Defaults to the standard logger. |
 
-### Buffering Settings
+### Buffering
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| **`BufferSize`** | `int` | `8MB` | The internal buffer size in bytes. Set to a **negative value (e.g., `-1`) to disable buffering**. A zero value uses the default `8MB`. |
-| **`LargeWriteThreshold`**| `float64`| $\approx 0.618$ | A ratio (0.0 to 1.0) of `BufferSize`. If a single write is larger than the calculated threshold, it **bypasses the buffer** and writes directly to the file to prevent a single large operation from blocking the buffer. |
-| **`FlushInterval`**| `time.Duration`| `1s` | How often the background routine automatically flushes the buffer to the file. |
-| **`MaxIdleBufferAge`**| `int`| `3` | The maximum number of consecutive `FlushInterval`s the buffer can be idle (no new writes) before the auto-flusher stops and **releases the buffer's memory** to conserve resources. It restarts automatically on the next write. |
+| `BufferSize` | `int` | `1MiB` | Buffer size in bytes. Negative disables buffering; zero uses the default. |
+| `MinDirectWriteSize` | `int` | `64KiB` | Writes at least this large skip the buffer and go straight to the file. Zero or negative uses the default. |
+| `FlushInterval` | `time.Duration` | `1s` | How often buffered data is flushed automatically. Zero or negative uses the default. |
+| `MaxIdleBufferAge` | `int` | `3` | Number of consecutive idle flush intervals after which the buffer's memory is released. Zero or negative uses the default. |
 
-### Testing Hooks
-
-The package provides hooks for dependency injection, useful for deterministic testing:
-
-| Option | Type | Description |
-| :--- | :--- | :--- |
-| **`Clock`** | `clock.Clock` | An interface for time operations. Use to inject a mock clock. |
-| **`Fs`** | `afero.Fs` | An interface for filesystem operations. Use to inject a mock filesystem (e.g., an in-memory FS). |
-| **`Go`** | `func(func())` | A function to start background goroutines. Use to capture goroutines for deterministic testing. |
-| **`Registry`** | `*sync.Map` | An internal registry for file managers. Used to observe/control the automatic file closing logic in tests. |
-
------
+---
 
 ## License
 

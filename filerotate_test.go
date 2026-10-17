@@ -3,868 +3,798 @@ package filerotate_test
 import (
 	"bytes"
 	"crypto/md5"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/benbjohnson/clock"
 	. "github.com/roy2220/filerotate"
-	"github.com/spf13/afero"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func Test_OpenFile(t *testing.T) {
-	_, err := OpenFile(Options{})
-	require.ErrorContains(t, err, "no file path pattern")
-}
-
-func Test_Write(t *testing.T) {
-	loc, err := time.LoadLocation("Asia/Shanghai")
+func openTempFile(t testing.TB, options Options) (io.WriteCloser, string) {
+	tempDir := t.TempDir()
+	if options.FilePathPattern != "" {
+		options.FilePathPattern = filepath.Join(tempDir, options.FilePathPattern)
+	}
+	if options.SymbolicLinkPath != "" {
+		options.SymbolicLinkPath = filepath.Join(tempDir, options.SymbolicLinkPath)
+	}
+	if options.Registry() == nil {
+		options.SetRegistry(new(sync.Map))
+	}
+	wc, err := OpenFile(options)
 	require.NoError(t, err)
-	t0 := time.Date(2001, 2, 3, 4, 5, 6, 0, loc)
-
-	t.Run(
-		"writes data to the file with the current timestamp in its name",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				BufferSize:      -1,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abc\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\n", string(data))
-
-			n, err = wc.Write([]byte("def\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			clock.Add(time.Hour)
-
-			n, err = wc.Write([]byte("ghi\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log")
-			require.NoError(t, err)
-			require.Equal(t, "ghi\n", string(data))
-
-			n, err = wc.Write([]byte("jkl\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			clock.Add(time.Hour)
-
-			err = afero.WriteFile(fs, "/log/2001-02-03-06.log", nil, 0644)
-			require.NoError(t, err)
-			err = afero.WriteFile(fs, "/log/2001-02-03-06.log.1", nil, 0644)
-			require.NoError(t, err)
-
-			n, err = wc.Write([]byte("mno\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\ndef\n", string(data))
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log")
-			require.NoError(t, err)
-			require.Equal(t, "ghi\njkl\n", string(data))
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-06.log.2")
-			require.NoError(t, err)
-			require.Equal(t, "mno\n", string(data))
-		},
-	)
-
-	t.Run(
-		"rotates the file when it exceeds the size limit",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
-				SymbolicLinkPath: "/log/test.log",
-				FileSizeLimit:    6,
-				BufferSize:       -1,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abc\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			n, err = wc.Write([]byte("def\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			n, err = wc.Write([]byte("ghi\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			n, err = wc.Write([]byte("jkl\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			clock.Add(time.Hour)
-
-			n, err = wc.Write([]byte("mnopqr\n"))
-			require.NoError(t, err)
-			require.Equal(t, 7, n)
-
-			n, err = wc.Write([]byte("stuvwx\n"))
-			require.NoError(t, err)
-			require.Equal(t, 7, n)
-
-			err = afero.WriteFile(fs, "/log/2001-02-03-05.log.2", nil, 0644)
-			require.NoError(t, err)
-			err = afero.WriteFile(fs, "/log/2001-02-03-05.log.3", nil, 0644)
-			require.NoError(t, err)
-
-			n, err = wc.Write([]byte("zzz\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\ndef\n", string(data))
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-04.log.1")
-			require.NoError(t, err)
-			require.Equal(t, "ghi\njkl\n", string(data))
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log")
-			require.NoError(t, err)
-			require.Equal(t, "mnopqr\n", string(data))
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log.1")
-			require.NoError(t, err)
-			require.Equal(t, "stuvwx\n", string(data))
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-05.log.4")
-			require.NoError(t, err)
-			require.Equal(t, "zzz\n", string(data))
-		},
-	)
-
-	t.Run(
-		"skips existing rotated files",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			err := afero.WriteFile(fs, "/log/2001-02-03-04.log", []byte("0\n"), 0644)
-			require.NoError(t, err)
-			err = afero.WriteFile(fs, "/log/2001-02-03-04.log.1", []byte("1\n"), 0644)
-			require.NoError(t, err)
-			err = afero.WriteFile(fs, "/log/2001-02-03-04.log.2", []byte("2\n"), 0644)
-			require.NoError(t, err)
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				FileSizeLimit:   6,
-				BufferSize:      -1,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abc\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log.2")
-			require.NoError(t, err)
-			require.Equal(t, "2\nabc\n", string(data))
-		},
-	)
-
-	t.Run(
-		"skips existing rotated files and rotates the file when it exceeds the size limit",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			err := afero.WriteFile(fs, "/log/2001-02-03-04.log", []byte("0\n"), 0644)
-			require.NoError(t, err)
-			err = afero.WriteFile(fs, "/log/2001-02-03-04.log.1", []byte("1\n"), 0644)
-			require.NoError(t, err)
-			err = afero.WriteFile(fs, "/log/2001-02-03-04.log.2", []byte("123456\n"), 0644)
-			require.NoError(t, err)
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				FileSizeLimit:   6,
-				BufferSize:      -1,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abc\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log.3")
-			require.NoError(t, err)
-			require.Equal(t, "abc\n", string(data))
-		},
-	)
-
-	t.Run(
-		"flushes buffered data to the file at regular intervals",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				BufferSize:      1000,
-				FlushInterval:   time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abc\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			time.Sleep(25 * time.Millisecond)
-
-			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
-			require.False(t, ok)
-
-			clock.Add(10 * time.Minute)
-			time.Sleep(25 * time.Millisecond)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\n", string(data))
-
-			n, err = wc.Write([]byte("def\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			time.Sleep(25 * time.Millisecond)
-			clock.Add(10 * time.Minute)
-			time.Sleep(25 * time.Millisecond)
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\ndef\n", string(data))
-		},
-	)
-
-	t.Run(
-		"writes large data directly to the file, bypassing the buffer",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          100,
-				LargeWriteThreshold: 0.05,
-				FlushInterval:       time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abcde\n"))
-			require.NoError(t, err)
-			require.Equal(t, 6, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abcde\n", string(data))
-		},
-	)
-
-	t.Run(
-		"writes large data directly to the file, bypassing the buffer",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          10,
-				LargeWriteThreshold: 0.6,
-				FlushInterval:       time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abcd\n"))
-			require.NoError(t, err)
-			require.Equal(t, 5, n)
-
-			n, err = wc.Write([]byte("efg\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
-			require.False(t, ok)
-
-			n, err = wc.Write([]byte("hijkl\n"))
-			require.NoError(t, err)
-			require.Equal(t, 6, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abcd\nefg\nhijkl\n", string(data))
-		},
-	)
-
-	t.Run(
-		"buffer should not be flushed if some data is buffered before the large write",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          100,
-				LargeWriteThreshold: 0.05,
-				FlushInterval:       time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("a\n"))
-			require.NoError(t, err)
-			require.Equal(t, 2, n)
-
-			n, err = wc.Write([]byte("bcdef\n"))
-			require.NoError(t, err)
-			require.Equal(t, 6, n)
-
-			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
-			require.False(t, ok)
-		},
-	)
-
-	t.Run(
-		"flushes buffered data if buffer is unsufficient for the new write",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          10,
-				LargeWriteThreshold: 1.0,
-				FlushInterval:       time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abcd\n"))
-			require.NoError(t, err)
-			require.Equal(t, 5, n)
-
-			n, err = wc.Write([]byte("efg\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
-			require.False(t, ok)
-
-			n, err = wc.Write([]byte("hijk\n"))
-			require.NoError(t, err)
-			require.Equal(t, 5, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abcd\nefg\n", string(data))
-
-			time.Sleep(25 * time.Millisecond)
-			clock.Add(10 * time.Minute)
-			time.Sleep(25 * time.Millisecond)
-
-			data, err = afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abcd\nefg\nhijk\n", string(data))
-		},
-	)
-
-	t.Run(
-		"stops the flush goroutine when buffer is idle for too long",
-		func(t *testing.T) {
-			var goroutineCount atomic.Int64
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Go: func(f func()) {
-					goroutineCount.Add(1)
-					go func() {
-						defer goroutineCount.Add(-1)
-						f()
-					}()
-				},
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:  "/log/%Y-%m-%d-%H.log",
-				BufferSize:       1000,
-				FlushInterval:    time.Minute,
-				MaxIdleBufferAge: 3,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abc\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			time.Sleep(25 * time.Millisecond)
-			clock.Add(1*time.Minute + time.Second)
-			time.Sleep(25 * time.Millisecond)
-
-			require.Equal(t, int64(1), goroutineCount.Load())
-
-			time.Sleep(25 * time.Millisecond)
-			clock.Add(4*time.Minute + time.Second)
-			time.Sleep(25 * time.Millisecond)
-
-			require.Equal(t, int64(0), goroutineCount.Load())
-
-			n, err = wc.Write([]byte("def\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			time.Sleep(25 * time.Millisecond)
-
-			require.Equal(t, int64(1), goroutineCount.Load())
-		},
-	)
-
-	t.Run(
-		"flushes even when there's no data to flush",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				BufferSize:      1000,
-				FlushInterval:   time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte(""))
-			require.NoError(t, err)
-			require.Equal(t, 0, n)
-
-			time.Sleep(25 * time.Millisecond)
-
-			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
-			require.False(t, ok)
-
-			clock.Add(10 * time.Minute)
-			time.Sleep(25 * time.Millisecond)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "", string(data))
-		},
-	)
-
-	t.Run(
-		"writes data to the file and ensures newline",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          10,
-				LargeWriteThreshold: 0.6,
-				EnsureNewline:       true,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abc"))
-			require.NoError(t, err)
-			require.Equal(t, 3, n)
-
-			n, err = wc.Write([]byte("def"))
-			require.NoError(t, err)
-			require.Equal(t, 3, n)
-
-			n, err = wc.Write([]byte("123456"))
-			require.NoError(t, err)
-			require.Equal(t, 6, n)
-
-			n, err = wc.Write([]byte("000000"))
-			require.NoError(t, err)
-			require.Equal(t, 6, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\ndef\n123456\n000000\n", string(data))
-		},
-	)
+	t.Cleanup(func() { wc.Close() })
+	return wc, tempDir
 }
 
-func Test_Close(t *testing.T) {
-	loc, err := time.LoadLocation("Asia/Shanghai")
+func openFileInDir(t testing.TB, options Options, dir string) io.WriteCloser {
+	if options.FilePathPattern != "" {
+		options.FilePathPattern = filepath.Join(dir, options.FilePathPattern)
+	}
+	if options.SymbolicLinkPath != "" {
+		options.SymbolicLinkPath = filepath.Join(dir, options.SymbolicLinkPath)
+	}
+	if options.Registry() == nil {
+		options.SetRegistry(new(sync.Map))
+	}
+	wc, err := OpenFile(options)
 	require.NoError(t, err)
-	t0 := time.Date(2001, 2, 3, 4, 5, 6, 0, loc)
-
-	t.Run(
-		"returns an error when writing to a closed WriteCloser",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				BufferSize:      -1,
-			})
-			require.NoError(t, err)
-
-			err = wc.Close()
-			require.NoError(t, err)
-
-			_, err = wc.Write([]byte("abc\n"))
-			require.ErrorContains(t, err, "closed")
-
-			err = wc.Close()
-			require.ErrorContains(t, err, "closed")
-
-		},
-	)
-
-	t.Run(
-		"returns an error when writing to a closed WriteCloser",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				BufferSize:      1000,
-				FlushInterval:   time.Minute,
-			})
-			require.NoError(t, err)
-
-			err = wc.Close()
-			require.NoError(t, err)
-
-			_, err = wc.Write([]byte("abc\n"))
-			require.ErrorContains(t, err, "closed")
-
-			err = wc.Close()
-			require.ErrorContains(t, err, "closed")
-
-		},
-	)
-
-	t.Run(
-		"flushes buffered data and stops the flush goroutine",
-		func(t *testing.T) {
-			var goroutineCount atomic.Int64
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Go: func(f func()) {
-					goroutineCount.Add(1)
-					go func() {
-						defer goroutineCount.Add(-1)
-						f()
-					}()
-				},
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				BufferSize:      1000,
-				FlushInterval:   time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				if wc != nil {
-					err := wc.Close()
-					assert.NoError(t, err)
-				}
-			})
-
-			n, err := wc.Write([]byte("abc\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
-
-			time.Sleep(25 * time.Millisecond)
-
-			err = wc.Close()
-			wc = nil
-			require.NoError(t, err)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abc\n", string(data))
-
-			require.Equal(t, int64(0), goroutineCount.Load())
-		},
-	)
-
-	t.Run(
-		"flushes even when there's no data to flush",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern: "/log/%Y-%m-%d-%H.log",
-				BufferSize:      1000,
-				FlushInterval:   time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				if wc != nil {
-					err := wc.Close()
-					assert.NoError(t, err)
-				}
-			})
-
-			n, err := wc.Write([]byte(""))
-			require.NoError(t, err)
-			require.Equal(t, 0, n)
-
-			err = wc.Close()
-			wc = nil
-			require.NoError(t, err)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "", string(data))
-		},
-	)
+	t.Cleanup(func() { wc.Close() })
+	return wc
 }
 
-func Test_CloseOutdatedFiles(t *testing.T) {
-	clock := clock.NewMock()
-	clock.Set(time.Now())
-	fs := afero.NewMemMapFs()
-	registry := &sync.Map{}
-
-	wc, err := OpenFile(Options{
-		Clock:    clock,
-		Fs:       fs,
-		Registry: registry,
-
-		FilePathPattern: "/log/%Y-%m-%d-%H.log",
-		BufferSize:      -1,
+func lookupWriteCloser(wc io.WriteCloser, registry *sync.Map) bool {
+	found := false
+	registry.Range(func(key, _ any) bool {
+		found = key == wc
+		return !found
 	})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		if wc != nil {
-			err := wc.Close()
-			assert.NoError(t, err)
-		}
-	})
+	return found
+}
 
-	_, err = wc.Write([]byte("hello\n"))
-	require.NoError(t, err)
-
+func countWriteClosers(registry *sync.Map) int {
 	n := 0
 	registry.Range(func(key, _ any) bool {
 		n++
-		require.NotEqual(t, "", key.(*FileManager).FilePath())
 		return true
 	})
-	require.Equal(t, 1, n)
-
-	go CloseOutdatedFiles(t.Context(), clock, registry)
-
-	time.Sleep(25 * time.Millisecond)
-	clock.Add(61 * time.Minute)
-	time.Sleep(100 * time.Millisecond)
-
-	n = 0
-	registry.Range(func(key, _ any) bool {
-		n++
-		require.Equal(t, "", key.(*FileManager).FilePath())
-		return true
-	})
-	require.Equal(t, 1, n)
-
-	err = wc.Close()
-	wc = nil
-	assert.NoError(t, err)
-
-	n = 0
-	registry.Range(func(key, _ any) bool {
-		n++
-		return true
-	})
-	require.Equal(t, 0, n)
+	return n
 }
 
-func Test_Comprehensive(t *testing.T) {
+func fillRandomData(b []byte) {
+	var seed []byte
+	for range 4 {
+		seed = binary.BigEndian.AppendUint64(seed, uint64(time.Now().UnixNano()))
+	}
+	io.ReadFull(rand.NewChaCha8([32]byte(seed)), b)
+}
+
+func resetFileOffset(t testing.TB, wc io.WriteCloser) {
+	var f *os.File
+	switch wc := wc.(type) {
+	case *WriteCloser:
+		f = wc.File()
+	case *BufferedWriteCloser:
+		f = wc.File()
+	default:
+		t.Fatal("unreachable")
+	}
+	_, err := f.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+}
+
+func TestOptions_ApplyDefaults(t *testing.T) {
+	t.Run("apply defaults for zero value", func(t *testing.T) {
+		var options Options
+		options.ApplyDefaults()
+		require.Equal(t, 1024*1024, options.BufferSize)
+		require.Equal(t, 64*1024, options.MinDirectWriteSize)
+		require.Equal(t, 1*time.Second, options.FlushInterval)
+		require.Equal(t, 3, options.MaxIdleBufferAge)
+	})
+
+	t.Run("keep set values", func(t *testing.T) {
+		options := Options{
+			BufferSize:         1024*1024 + 1,
+			MinDirectWriteSize: 64*1024 + 2,
+			FlushInterval:      1*time.Second + 3,
+			MaxIdleBufferAge:   3 + 4,
+		}
+		options.ApplyDefaults()
+		require.Equal(t, 1024*1024+1, options.BufferSize)
+		require.Equal(t, 64*1024+2, options.MinDirectWriteSize)
+		require.Equal(t, 1*time.Second+3, options.FlushInterval)
+		require.Equal(t, 3+4, options.MaxIdleBufferAge)
+	})
+}
+
+func TestOpenFileFailed(t *testing.T) {
+	_, err := OpenFile(Options{})
+	require.ErrorContains(t, err, "no file path pattern")
+
+	_, err = OpenFile(Options{FilePathPattern: "%0"})
+	require.ErrorContains(t, err, "invalid file path pattern")
+}
+
+func TestWriteCloser_Write(t *testing.T) {
+	t.Run("write empty data", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:      -1,
+			})
+
+			n, err := wc.Write([]byte(""))
+			require.NoError(t, err)
+			require.Equal(t, 0, n)
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+			require.FileExists(t, filePath)
+		})
+	})
+
+	t.Run("rotate file for time", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:      -1,
+			})
+
+			for i := range 10 {
+				n, err := wc.Write([]byte("hello world\n"))
+				require.NoError(t, err)
+				require.Equal(t, 12, n)
+
+				filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+				data, err := os.ReadFile(filePath)
+				require.NoError(t, err)
+
+				expectedData := strings.Repeat("hello world\n", 1+(i%3))
+				require.Equalf(t, expectedData, string(data), "i=%d", i)
+
+				time.Sleep(20 * time.Second)
+			}
+		})
+	})
+
+	t.Run("rotate file for size", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				FileSizeLimit:   30,
+				BufferSize:      -1,
+			})
+
+			for i := range 10 {
+				n, err := wc.Write([]byte("hello world\n"))
+				require.NoError(t, err)
+				require.Equal(t, 12, n)
+
+				filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+				if n := i / 3; n >= 1 {
+					filePath += "." + strconv.Itoa(n)
+				}
+				data, err := os.ReadFile(filePath)
+				require.NoError(t, err)
+
+				expectedData := strings.Repeat("hello world\n", 1+(i%3))
+				require.Equalf(t, expectedData, string(data), "i=%d", i)
+			}
+		})
+	})
+
+	t.Run("update symbolic link", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern:  "foo/app-%Y-%m-%d_%H-%M.log",
+				SymbolicLinkPath: "foo/app.log",
+				BufferSize:       -1,
+			})
+
+			for i := range 10 {
+				n, err := wc.Write([]byte("hello world\n"))
+				require.NoError(t, err)
+				require.Equal(t, 12, n)
+
+				filePath, err := os.Readlink(filepath.Join(tempDir, "foo/app.log"))
+				require.NoError(t, err)
+
+				expectedFilePath := filepath.Join(tempDir, time.Now().Format("foo/app-2006-01-02_15-04.log"))
+				require.Equalf(t, expectedFilePath, filePath, "i=%d", i)
+
+				time.Sleep(20 * time.Second)
+			}
+		})
+	})
+
+	t.Run("ensure newline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				EnsureNewline:   true,
+				BufferSize:      -1,
+			})
+
+			for range 3 {
+				n, err := wc.Write([]byte(""))
+				require.NoError(t, err)
+				require.Equal(t, 0, n)
+
+				n, err = wc.Write([]byte("hello world"))
+				require.NoError(t, err)
+				require.Equal(t, 11, n)
+			}
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+
+			expectedData := strings.Repeat("\nhello world\n", 3)
+			require.Equal(t, expectedData, string(data))
+		})
+	})
+
+	t.Run("open latest file", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:      -1,
+			})
+
+			for i := range 3 {
+				filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+				if i >= 1 {
+					filePath += "." + strconv.Itoa(i)
+				}
+				err := os.WriteFile(filePath, []byte("test\n"), 0644)
+				require.NoError(t, err)
+			}
+
+			n, err := wc.Write([]byte("hello world\n"))
+			require.NoError(t, err)
+			require.Equal(t, 12, n)
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log")+".2")
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			require.Equal(t, "test\nhello world\n", string(data))
+		})
+	})
+
+	t.Run("rotate file for size after existing files", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				FileSizeLimit:   10,
+				BufferSize:      -1,
+			})
+
+			for i := range 3 {
+				filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+				filePath += "." + strconv.Itoa(1+i)
+				err := os.WriteFile(filePath, []byte("test\n"), 0644)
+				require.NoError(t, err)
+			}
+
+			for i := range 2 {
+				_, err := fmt.Fprintf(wc, "hello world %d\n", 1+i)
+				require.NoError(t, err)
+			}
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log")+".4")
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			require.Equal(t, "hello world 2\n", string(data))
+		})
+	})
+
+	t.Run("rotate file for time after existing files", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:      -1,
+			})
+
+			for i := range 3 {
+				filePath := filepath.Join(tempDir, time.Now().Add(time.Minute).Format("app-2006-01-02_15-04.log"))
+				if i >= 1 {
+					filePath += "." + strconv.Itoa(i)
+				}
+				err := os.WriteFile(filePath, []byte("test\n"), 0644)
+				require.NoError(t, err)
+			}
+
+			for i := range 2 {
+				_, err := fmt.Fprintf(wc, "hello world %d\n", 1+i)
+				require.NoError(t, err)
+				if i == 0 {
+					time.Sleep(time.Minute)
+				}
+			}
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log")+".3")
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			require.Equal(t, "hello world 2\n", string(data))
+		})
+	})
+
+	t.Run("write after close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, _ := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:      -1,
+			})
+
+			err := wc.Close()
+			require.NoError(t, err)
+
+			n, err := wc.Write([]byte("test"))
+			require.ErrorContains(t, err, "closed")
+			require.Equal(t, 0, n)
+		})
+	})
+}
+
+func TestWriteCloser_Close(t *testing.T) {
+	t.Run("close without open file", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			registry := new(sync.Map)
+
+			wc, _ := openTempFile(t, *(&Options{
+				FilePathPattern: "app-%Y-%m-%d_%H.log",
+				BufferSize:      -1,
+			}).SetRegistry(registry))
+
+			require.True(t, lookupWriteCloser(wc, registry))
+
+			err := wc.Close()
+			require.NoError(t, err)
+
+			require.False(t, lookupWriteCloser(wc, registry))
+
+			err = wc.Close()
+			require.ErrorContains(t, err, "closed")
+		})
+	})
+
+	t.Run("close open file", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			registry := new(sync.Map)
+
+			wc, _ := openTempFile(t, *(&Options{
+				FilePathPattern: "app-%Y-%m-%d_%H.log",
+				BufferSize:      -1,
+			}).SetRegistry(registry))
+
+			_, err := wc.Write([]byte("test\n"))
+			require.NoError(t, err)
+
+			file := wc.(*WriteCloser).File()
+			require.NotNil(t, file)
+
+			err = wc.Close()
+			require.NoError(t, err)
+
+			err = file.Close()
+			require.ErrorContains(t, err, "file already closed")
+		})
+	})
+}
+
+func TestRunOutdatedFileCloser(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		registry := new(sync.Map)
+
+		wc, tempDir := openTempFile(t, *(&Options{
+			FilePathPattern: "app-%Y-%m-%d_%H.log",
+			BufferSize:      -1,
+		}).SetRegistry(registry))
+
+		go func() {
+			RunOutdatedFileCloser(t.Context(), registry)
+		}()
+
+		n, err := wc.Write([]byte("hello world\n"))
+		require.NoError(t, err)
+		require.Equal(t, 12, n)
+
+		filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15.log"))
+		require.Equal(t, filePath, wc.(*WriteCloser).File().Name())
+
+		time.Sleep(59 * time.Minute)
+		require.Equal(t, filePath, wc.(*WriteCloser).File().Name())
+
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		require.Nil(t, wc.(*WriteCloser).File())
+
+		time.Sleep(3 * time.Minute)
+	})
+}
+
+func TestBufferedWriteCloser_Write(t *testing.T) {
+	t.Run("write empty data", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern: "app-%Y-%m-%d_%H-%M.log",
+				FlushInterval:   5 * time.Second,
+			})
+
+			n, err := wc.Write([]byte(""))
+			require.NoError(t, err)
+			require.Equal(t, 0, n)
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+			require.NoFileExists(t, filePath)
+
+			time.Sleep(5 * time.Second)
+			synctest.Wait()
+
+			require.FileExists(t, filePath)
+		})
+	})
+
+	t.Run("direct write bypasses buffer #1", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 10,
+				FlushInterval:      time.Hour,
+			})
+
+			for i := range 3 {
+				p := append([]byte("123456789AB")[:8+i], '\n')
+				n, err := wc.Write(p)
+				require.NoError(t, err)
+				require.Equal(t, len(p), n)
+
+				filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+				if i == 0 {
+					require.NoFileExists(t, filePath)
+				} else {
+					data, err := os.ReadFile(filePath)
+					require.NoError(t, err)
+					if i == 1 {
+						require.Equal(t, "12345678\n123456789\n", string(data))
+					} else {
+						require.Equal(t, "12345678\n123456789\n123456789A\n", string(data))
+					}
+				}
+
+			}
+		})
+	})
+
+	t.Run("direct write bypasses buffer #2", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:         10,
+				MinDirectWriteSize: 100,
+				FlushInterval:      time.Hour,
+			})
+
+			for i := range 3 {
+				p := append([]byte("123456789AB")[:8+i], '\n')
+				n, err := wc.Write(p)
+				require.NoError(t, err)
+				require.Equal(t, len(p), n)
+
+				filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+				if i == 0 {
+					require.NoFileExists(t, filePath)
+				} else {
+					data, err := os.ReadFile(filePath)
+					require.NoError(t, err)
+					if i == 1 {
+						require.Equal(t, "12345678\n123456789\n", string(data))
+					} else {
+						require.Equal(t, "12345678\n123456789\n123456789A\n", string(data))
+					}
+				}
+
+			}
+		})
+	})
+
+	t.Run("flush buffer when full", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:         10,
+				MinDirectWriteSize: 10,
+				FlushInterval:      time.Hour,
+			})
+
+			n, err := wc.Write([]byte("hello "))
+			require.NoError(t, err)
+			require.Equal(t, 6, n)
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+			require.NoFileExists(t, filePath)
+
+			n, err = wc.Write([]byte("world!"))
+			require.NoError(t, err)
+			require.Equal(t, 6, n)
+
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			require.Equal(t, "hello ", string(data))
+		})
+	})
+
+	t.Run("flush buffer after interval", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 10,
+				FlushInterval:      1 * time.Second,
+			})
+
+			for i := range 2 {
+				var p []byte
+				if i == 0 {
+					p = []byte("1234\n")
+				} else {
+					p = []byte("abcd\n")
+				}
+				n, err := wc.Write(p)
+				require.NoError(t, err)
+				require.Equal(t, len(p), n)
+			}
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+			require.NoFileExists(t, filePath)
+
+			time.Sleep(1 * time.Second)
+			synctest.Wait()
+
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			require.Equal(t, "1234\nabcd\n", string(data))
+		})
+	})
+
+	t.Run("ensure newline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, tempDir := openTempFile(t, Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:         10,
+				MinDirectWriteSize: 10,
+				FlushInterval:      time.Hour,
+				EnsureNewline:      true,
+			})
+
+			for i := range 2 {
+				p := []byte("123456789AB")[:8+i]
+				n, err := wc.Write(p)
+				require.NoError(t, err)
+				require.Equal(t, len(p), n)
+
+				filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+				if i == 0 {
+					require.NoFileExists(t, filePath)
+				} else {
+					data, err := os.ReadFile(filePath)
+					require.NoError(t, err)
+					require.Equal(t, "12345678\n123456789\n", string(data))
+				}
+			}
+		})
+	})
+
+	t.Run("write after close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, _ := openTempFile(t, Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 10,
+			})
+
+			err := wc.Close()
+			require.NoError(t, err)
+
+			n, err := wc.Write([]byte("test"))
+			require.ErrorContains(t, err, "closed")
+			require.Equal(t, 0, n)
+		})
+	})
+
+	t.Run("restart auto flusher when idle", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var goroutineCount atomic.Int32
+
+			wc, tempDir := openTempFile(t, *(&Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H-%M.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 10,
+				FlushInterval:      1 * time.Second,
+				MaxIdleBufferAge:   5,
+			}).SetGo(func(f func()) {
+				goroutineCount.Add(1)
+				go func() {
+					f()
+					goroutineCount.Add(-1)
+				}()
+			}))
+
+			n, err := wc.Write([]byte("hello "))
+			require.NoError(t, err)
+			require.Equal(t, 6, n)
+
+			time.Sleep(5 * time.Second)
+			synctest.Wait()
+
+			require.Equal(t, 1, int(goroutineCount.Load()))
+
+			time.Sleep(1 * time.Second)
+			synctest.Wait()
+			require.Equal(t, 0, int(goroutineCount.Load()))
+
+			n, err = wc.Write([]byte("world!"))
+			require.NoError(t, err)
+			require.Equal(t, 6, n)
+
+			time.Sleep(1 * time.Second)
+			synctest.Wait()
+
+			require.Equal(t, 1, int(goroutineCount.Load()))
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15-04.log"))
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			require.Equal(t, "hello world!", string(data))
+		})
+	})
+}
+
+func TestBufferedWriteCloser_Close(t *testing.T) {
+	t.Run("close without open file", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			registry := new(sync.Map)
+
+			wc, _ := openTempFile(t, *(&Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 10,
+				FlushInterval:      1 * time.Hour,
+				MaxIdleBufferAge:   5,
+			}).SetRegistry(registry))
+
+			require.Equal(t, 1, countWriteClosers(registry))
+
+			err := wc.Close()
+			require.NoError(t, err)
+
+			require.Equal(t, 0, countWriteClosers(registry))
+
+			err = wc.Close()
+			require.ErrorContains(t, err, "closed")
+		})
+	})
+
+	t.Run("close after empty write", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			registry := new(sync.Map)
+
+			wc, tempDir := openTempFile(t, *(&Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 10,
+				FlushInterval:      1 * time.Hour,
+				MaxIdleBufferAge:   5,
+			}).SetRegistry(registry))
+
+			_, err := wc.Write([]byte(""))
+			require.NoError(t, err)
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15.log"))
+			require.NoFileExists(t, filePath)
+
+			err = wc.Close()
+			require.NoError(t, err)
+
+			require.FileExists(t, filePath)
+		})
+	})
+
+	t.Run("flush buffer on close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			registry := new(sync.Map)
+			var goroutineCount atomic.Int32
+
+			wc, tempDir := openTempFile(t, *(&Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 100,
+				FlushInterval:      1 * time.Hour,
+				MaxIdleBufferAge:   5,
+			}).
+				SetRegistry(registry).
+				SetGo(func(f func()) {
+					goroutineCount.Add(1)
+					go func() {
+						f()
+						goroutineCount.Add(-1)
+					}()
+				}))
+
+			_, err := wc.Write([]byte("hello world!"))
+			require.NoError(t, err)
+
+			require.Equal(t, 1, int(goroutineCount.Load()))
+
+			filePath := filepath.Join(tempDir, time.Now().Format("app-2006-01-02_15.log"))
+			require.NoFileExists(t, filePath)
+
+			err = wc.Close()
+			require.NoError(t, err)
+
+			require.Equal(t, 0, int(goroutineCount.Load()))
+
+			data, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			require.Equal(t, "hello world!", string(data))
+		})
+	})
+}
+
+func TestComprehensive(t *testing.T) {
 	const N = 10
 	const M = 200
 
-	dirPath := t.TempDir()
-	symbolicLinkPath := filepath.Join(dirPath, "app.log")
-	wc, err := OpenFile(Options{
-		FilePathPattern:  filepath.Join(dirPath, "app_%Y-%m-%d-%H-%M-%S.log"),
-		SymbolicLinkPath: symbolicLinkPath,
+	wc, tempDir := openTempFile(t, Options{
+		FilePathPattern:  "app_%Y-%m-%d-%H-%M-%S.log",
+		SymbolicLinkPath: "app.log",
 		FileSizeLimit:    10000,
-		BufferSize:       100,
+		BufferSize:       150,
 		FlushInterval:    30 * time.Millisecond,
+		EnsureNewline:    true,
 	})
-	require.NoError(t, err)
 
 	line := []byte("The quick brown fox jumps over the lazy dog\n")
+	lines := [...][]byte{
+		line,
+		bytes.Repeat(line, 2),
+		bytes.Repeat(line, 3),
+	}
 	var wg sync.WaitGroup
 	for range N {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range M {
-				_, err := wc.Write(line)
+		wg.Go(func() {
+			for m := M; m >= 1; {
+				i := rand.IntN(min(m, len(lines)))
+				m -= i + 1
+				p := lines[i]
+				l := len(p) - rand.IntN(2)
+				_, err := wc.Write(p[:l])
 				require.NoError(t, err)
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(time.Duration(5+rand.IntN(10)) * time.Millisecond)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
-	err = wc.Close()
-	assert.NoError(t, err)
-
-	entries, err := os.ReadDir(dirPath)
+	err := wc.Close()
 	require.NoError(t, err)
+
+	entries, err := os.ReadDir(tempDir)
+	require.NoError(t, err)
+	rand.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
 	hash := md5.New()
 	var filePaths []string
 	for _, entry := range entries {
@@ -874,22 +804,91 @@ func Test_Comprehensive(t *testing.T) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
-		filePath := filepath.Join(dirPath, entry.Name())
+		filePath := filepath.Join(tempDir, entry.Name())
 		fileInfo, err := entry.Info()
 		require.NoError(t, err)
 		t.Logf("filePath=%q fileSize=%v", filePath, fileInfo.Size())
-		data, err := os.ReadFile(filePath)
+
+		f, err := os.Open(filePath)
 		require.NoError(t, err)
-		hash.Write(data)
+		_, err = io.Copy(hash, f)
+		require.NoError(t, err)
+		f.Close()
+
 		filePaths = append(filePaths, filePath)
 	}
 
-	expectedHashSum := md5.Sum(bytes.Repeat(line, N*M))
-	require.Equal(t, expectedHashSum[:], hash.Sum(nil))
+	expectedHash := md5.New()
+	for range N * M {
+		_, err := expectedHash.Write(line)
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, expectedHash.Sum(nil), hash.Sum(nil))
 
 	sort.Strings(filePaths)
 	expectedLinkedFilePath := filePaths[len(filePaths)-1]
-	lastFilePath, err := os.Readlink(symbolicLinkPath)
+	latestFilePath, err := os.Readlink(filepath.Join(tempDir, "app.log"))
 	require.NoError(t, err)
-	require.Equal(t, expectedLinkedFilePath, lastFilePath)
+	require.Equal(t, expectedLinkedFilePath, latestFilePath)
+}
+
+func BenchmarkWriteCloser_Write(b *testing.B) {
+	const maxFileSize = 300 * 1024 * 1024
+
+	SetOpenFileFlagModifier(b, func(flag int) int {
+		return flag & ^os.O_APPEND
+	})
+
+	tempDir := b.TempDir()
+	data := make([]byte, 1024*1024)
+	fillRandomData(make([]byte, 1024*1024))
+
+	for _, writeSize := range [...]int{
+		96 * 1024,
+		64 * 1024,
+		48 * 1024,
+		32 * 1024,
+		16 * 1024,
+		4 * 1024,
+		1000,
+		500,
+		100,
+	} {
+		b.Run(fmt.Sprintf("WS=%v", writeSize), func(b *testing.B) {
+			for _, buffering := range [...]bool{false, true} {
+				bufferSize := 0         // use default
+				minDirectWriteSize := 0 // use default
+				if !buffering {
+					bufferSize = -1
+				}
+
+				b.Run(fmt.Sprintf("B=%v", buffering), func(b *testing.B) {
+					wc := openFileInDir(b, Options{
+						FilePathPattern:    "app_%Y-%m-%d.log",
+						EnsureNewline:      true,
+						BufferSize:         bufferSize,
+						MinDirectWriteSize: minDirectWriteSize,
+					}, tempDir)
+
+					data := data[:writeSize]
+					n := 0
+					b.SetBytes(int64(writeSize))
+					b.ReportAllocs()
+
+					for b.Loop() {
+						nn, err := wc.Write(data)
+						if err != nil {
+							b.Fail()
+						}
+						n += nn
+						if n >= maxFileSize {
+							resetFileOffset(b, wc)
+							n = 0
+						}
+					}
+				})
+			}
+		})
+	}
 }
