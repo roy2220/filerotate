@@ -86,7 +86,7 @@ The `filerotate.Options` struct controls both file rotation and I/O buffering.
 | **`SymbolicLinkPath`** | `string` | **Optional.** The path to a symbolic link that will always point to the most recently active log file. Leave empty to disable. |
 | **`FileSizeLimit`** | `int64` | The maximum size (in bytes) of a single file. Set to a non-positive value (e.g., `0`) to **disable size-based rotation**. Rotated files are appended with an index, e.g., `app-2023-10-02.log.1`, `app-2023-10-02.log.2`, etc. |
 | **`EnsureNewline`** | `bool` | If `true`, a newline character (`\n`) is appended to every write operation, unless the written data already ends with one. This is generally most efficient when buffering is enabled (`BufferSize >= 1`). |
-| **`LogInternalError`**| `func(error)` | A callback function to handle errors that occur during background operations (e.g., auto-flushing failures, file close errors). If `nil`, a default logger that writes to standard output is used. |
+| **`LogInternalError`**| `func(error)` | A callback function to handle errors that occur during background operations (e.g., automatic flushing failures, file close errors). If `nil`, a default logger that writes to standard output is used. |
 
 ### Buffering Settings
 
@@ -94,8 +94,8 @@ The `filerotate.Options` struct controls both file rotation and I/O buffering.
 | :--- | :--- | :--- | :--- |
 | **`BufferSize`** | `int` | `8MB` | The internal buffer size in bytes. Set to a **negative value (e.g., `-1`) to disable buffering**. A zero value uses the default `8MB`. |
 | **`LargeWriteThreshold`**| `float64`| $\approx 0.618$ | A ratio (0.0 to 1.0) of `BufferSize`. If a single write is larger than the calculated threshold, it **bypasses the buffer** and writes directly to the file to prevent a single large operation from blocking the buffer. |
-| **`FlushInterval`**| `time.Duration`| `1s` | How often the background routine automatically flushes the buffer to the file. |
-| **`MaxIdleBufferAge`**| `int`| `3` | The maximum number of consecutive `FlushInterval`s the buffer can be idle (no new writes) before the auto-flusher stops and **releases the buffer's memory** to conserve resources. It restarts automatically on the next write. |
+| **`FlushInterval`**| `time.Duration`| `1s` | How often buffered data is automatically flushed to the file. |
+| **`MaxIdleBufferAge`**| `int`| `3` | The maximum number of consecutive `FlushInterval`s that the buffer can remain idle (without new writes) before **the buffer's memory gets reclaimed** to conserve resources. |
 
 ### Testing Hooks
 

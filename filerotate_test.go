@@ -804,7 +804,7 @@ func Test_CloseOutdatedFiles(t *testing.T) {
 	})
 	require.Equal(t, 1, n)
 
-	go CloseOutdatedFiles(t.Context(), clock, registry)
+	go RunOutdatedFileCloser(t.Context(), clock, registry)
 
 	time.Sleep(25 * time.Millisecond)
 	clock.Add(61 * time.Minute)
@@ -840,12 +840,13 @@ func Test_Comprehensive(t *testing.T) {
 		FilePathPattern:  filepath.Join(dirPath, "app_%Y-%m-%d-%H-%M-%S.log"),
 		SymbolicLinkPath: symbolicLinkPath,
 		FileSizeLimit:    10000,
-		BufferSize:       100,
+		BufferSize:       150,
 		FlushInterval:    30 * time.Millisecond,
+		EnsureNewline:    true,
 	})
 	require.NoError(t, err)
 
-	line := []byte("The quick brown fox jumps over the lazy dog\n")
+	line := []byte("The quick brown fox jumps over the lazy dog")
 	var wg sync.WaitGroup
 	for range N {
 		wg.Add(1)
@@ -884,7 +885,7 @@ func Test_Comprehensive(t *testing.T) {
 		filePaths = append(filePaths, filePath)
 	}
 
-	expectedHashSum := md5.Sum(bytes.Repeat(line, N*M))
+	expectedHashSum := md5.Sum(bytes.Repeat(append(line, '\n'), N*M))
 	require.Equal(t, expectedHashSum[:], hash.Sum(nil))
 
 	sort.Strings(filePaths)

@@ -2,8 +2,12 @@ package filerotate
 
 // Exported for testing
 
-var CloseOutdatedFiles = closeOutdatedFiles
+var RunOutdatedFileCloser = runOutdatedFileCloser
 
 type FileManager = fileManager
 
 func (m *fileManager) FilePath() string { return m.filePath }
+
+func init() {
+	startDefaultOutdatedFileCloserOnce = func() {}
+}
