@@ -3,6 +3,8 @@ package filerotate_test
 import (
 	"bytes"
 	"crypto/md5"
+	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -323,67 +325,44 @@ func Test_Write(t *testing.T) {
 				Registry: &sync.Map{},
 
 				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          100,
-				LargeWriteThreshold: 0.05,
+				BufferSize:          64 * 1024,
+				LargeWriteThreshold: 1.0,
 				FlushInterval:       time.Minute,
+				EnsureNewline:       true,
 			})
 			require.NoError(t, err)
 			t.Cleanup(func() {
 				err := wc.Close()
 				assert.NoError(t, err)
 			})
-
-			n, err := wc.Write([]byte("abcde\n"))
-			require.NoError(t, err)
-			require.Equal(t, 6, n)
-
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
-			require.NoError(t, err)
-			require.Equal(t, "abcde\n", string(data))
-		},
-	)
-
-	t.Run(
-		"writes large data directly to the file, bypassing the buffer",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          10,
-				LargeWriteThreshold: 0.6,
-				FlushInterval:       time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("abcd\n"))
-			require.NoError(t, err)
-			require.Equal(t, 5, n)
-
-			n, err = wc.Write([]byte("efg\n"))
-			require.NoError(t, err)
-			require.Equal(t, 4, n)
 
 			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
 			require.False(t, ok)
 
-			n, err = wc.Write([]byte("hijkl\n"))
+			r := rand.NewChaCha8([32]byte{})
+			p := make([]byte, 64*1024)
+			_, err = io.ReadFull(r, p)
 			require.NoError(t, err)
-			require.Equal(t, 6, n)
+			p[len(p)-1] = '0'
 
-			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
+			n, err := wc.Write(p)
 			require.NoError(t, err)
-			require.Equal(t, "abcd\nefg\nhijkl\n", string(data))
+			require.Equal(t, len(p), n)
+
+			expectedHash := md5.New()
+			_, err = expectedHash.Write(p)
+			require.NoError(t, err)
+			_, err = expectedHash.Write([]byte{'\n'})
+			require.NoError(t, err)
+
+			f, err := fs.Open("/log/2001-02-03-04.log")
+			hash := md5.New()
+			_, err = io.Copy(hash, f)
+			require.NoError(t, err)
+			f.Close()
+
+			require.NoError(t, err)
+			require.Equal(t, expectedHash.Sum(nil), hash.Sum(nil))
 		},
 	)
 
@@ -595,11 +574,11 @@ func Test_Write(t *testing.T) {
 				assert.NoError(t, err)
 			})
 
-			n, err := wc.Write([]byte("abc"))
+			n, err := wc.Write([]byte(""))
 			require.NoError(t, err)
-			require.Equal(t, 3, n)
+			require.Equal(t, 0, n)
 
-			n, err = wc.Write([]byte("def"))
+			n, err = wc.Write([]byte("abc"))
 			require.NoError(t, err)
 			require.Equal(t, 3, n)
 
@@ -607,13 +586,49 @@ func Test_Write(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 6, n)
 
-			n, err = wc.Write([]byte("000000"))
+			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
+			require.NoError(t, err)
+			require.Equal(t, "\nabc\n123456\n", string(data))
+		},
+	)
+
+	t.Run(
+		"writes data to the file without buffer and ensures newline",
+		func(t *testing.T) {
+			clock := clock.NewMock()
+			clock.Set(t0)
+			fs := afero.NewMemMapFs()
+
+			wc, err := OpenFile(Options{
+				Clock:    clock,
+				Fs:       fs,
+				Registry: &sync.Map{},
+
+				FilePathPattern: "/log/%Y-%m-%d-%H.log",
+				BufferSize:      -1,
+				EnsureNewline:   true,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				err := wc.Close()
+				assert.NoError(t, err)
+			})
+
+			n, err := wc.Write([]byte(""))
+			require.NoError(t, err)
+			require.Equal(t, 0, n)
+
+			n, err = wc.Write([]byte("abc"))
+			require.NoError(t, err)
+			require.Equal(t, 3, n)
+
+			n, err = wc.Write([]byte("123456"))
 			require.NoError(t, err)
 			require.Equal(t, 6, n)
 
 			data, err := afero.ReadFile(fs, "/log/2001-02-03-04.log")
 			require.NoError(t, err)
-			require.Equal(t, "abc\ndef\n123456\n000000\n", string(data))
+			require.Equal(t, "\nabc\n123456\n", string(data))
 		},
 	)
 }
@@ -804,7 +819,7 @@ func Test_CloseOutdatedFiles(t *testing.T) {
 	})
 	require.Equal(t, 1, n)
 
-	go CloseOutdatedFiles(t.Context(), clock, registry)
+	go RunOutdatedFileCloser(t.Context(), clock, registry)
 
 	time.Sleep(25 * time.Millisecond)
 	clock.Add(61 * time.Minute)
@@ -840,21 +855,31 @@ func Test_Comprehensive(t *testing.T) {
 		FilePathPattern:  filepath.Join(dirPath, "app_%Y-%m-%d-%H-%M-%S.log"),
 		SymbolicLinkPath: symbolicLinkPath,
 		FileSizeLimit:    10000,
-		BufferSize:       100,
+		BufferSize:       150,
 		FlushInterval:    30 * time.Millisecond,
+		EnsureNewline:    true,
 	})
 	require.NoError(t, err)
 
 	line := []byte("The quick brown fox jumps over the lazy dog\n")
+	lines := [...][]byte{
+		line,
+		bytes.Repeat(line, 2),
+		bytes.Repeat(line, 3),
+	}
 	var wg sync.WaitGroup
 	for range N {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range M {
-				_, err := wc.Write(line)
+			for m := M; m >= 1; {
+				i := rand.IntN(min(m, len(lines)))
+				m -= i + 1
+				p := lines[i]
+				l := len(p) - rand.IntN(2)
+				_, err := wc.Write(p[:l])
 				require.NoError(t, err)
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(time.Duration(5+rand.IntN(10)) * time.Millisecond)
 			}
 		}()
 	}
@@ -865,6 +890,7 @@ func Test_Comprehensive(t *testing.T) {
 
 	entries, err := os.ReadDir(dirPath)
 	require.NoError(t, err)
+	rand.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
 	hash := md5.New()
 	var filePaths []string
 	for _, entry := range entries {
@@ -878,14 +904,23 @@ func Test_Comprehensive(t *testing.T) {
 		fileInfo, err := entry.Info()
 		require.NoError(t, err)
 		t.Logf("filePath=%q fileSize=%v", filePath, fileInfo.Size())
-		data, err := os.ReadFile(filePath)
+
+		f, err := os.Open(filePath)
 		require.NoError(t, err)
-		hash.Write(data)
+		_, err = io.Copy(hash, f)
+		require.NoError(t, err)
+		f.Close()
+
 		filePaths = append(filePaths, filePath)
 	}
 
-	expectedHashSum := md5.Sum(bytes.Repeat(line, N*M))
-	require.Equal(t, expectedHashSum[:], hash.Sum(nil))
+	expectedHash := md5.New()
+	for range N * M {
+		_, err := expectedHash.Write(line)
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, expectedHash.Sum(nil), hash.Sum(nil))
 
 	sort.Strings(filePaths)
 	expectedLinkedFilePath := filePaths[len(filePaths)-1]
