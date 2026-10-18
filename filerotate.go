@@ -24,8 +24,9 @@ import (
 const (
 	defaultBufferSize          = 8 * 1024 * 1024
 	defaultFlushInterval       = 1 * time.Second
-	defaultMaxIdleBufferAge    = 3
+	defaultFlushThreshold      = 0.75
 	defaultLargeWriteThreshold = 1 / math.Phi
+	defaultMaxIdleBufferAge    = 3
 )
 
 var (
@@ -96,15 +97,18 @@ type Options struct {
 	// set it to a negative value (e.g., -1).
 	BufferSize int
 
+	// FlushThreshold is a ratio (0.0 to 1.0) of BufferSize. TODO
+	FlushThreshold float64
+
+	// FlushInterval specifies how often the buffer should be automatically
+	// flushed. A non-positive value uses a default interval of 1 second.
+	FlushInterval time.Duration
+
 	// LargeWriteThreshold is a ratio (0.0 to 1.0) of BufferSize. If a
 	// single write operation is larger than this threshold, it will bypass
 	// the buffer and write directly to the underlying file. A non-positive
 	// value uses a default threshold based on the golden ratio (0.618).
 	LargeWriteThreshold float64
-
-	// FlushInterval specifies how often the buffer should be automatically
-	// flushed. A non-positive value uses a default interval of 1 second.
-	FlushInterval time.Duration
 
 	// MaxIdleBufferAge specifies the maximum number of consecutive flush
 	// intervals that the buffer can remain idle (without new writes)
@@ -135,13 +139,18 @@ func (o *Options) applyDefaults() {
 	if o.BufferSize == 0 {
 		o.BufferSize = defaultBufferSize
 	}
+	if o.FlushThreshold <= 0.0 {
+		o.FlushThreshold = defaultFlushThreshold
+	} else if o.FlushThreshold > 1.0 {
+		o.FlushThreshold = 1.0
+	}
+	if o.FlushInterval <= 0 {
+		o.FlushInterval = defaultFlushInterval
+	}
 	if o.LargeWriteThreshold <= 0.0 {
 		o.LargeWriteThreshold = defaultLargeWriteThreshold
 	} else if o.LargeWriteThreshold > 1.0 {
 		o.LargeWriteThreshold = 1.0
-	}
-	if o.FlushInterval <= 0 {
-		o.FlushInterval = defaultFlushInterval
 	}
 	if o.MaxIdleBufferAge <= 0 {
 		o.MaxIdleBufferAge = defaultMaxIdleBufferAge
@@ -187,7 +196,7 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 		return nil, fmt.Errorf("filerotate: invalid file path pattern: %w", err)
 	}
 
-	wc := io.WriteCloser(newFileManager(
+	fileManager := newFileManager(
 		filePathPattern,
 		options.SymbolicLinkPath,
 		options.FileSizeLimit,
@@ -196,22 +205,23 @@ func OpenFile(options Options) (io.WriteCloser, error) {
 		options.Clock,
 		options.Fs,
 		options.Registry,
-	))
-	if options.BufferSize >= 1 {
-		wc = newBufferedWriteCloser(
-			wc,
-			options.BufferSize,
-			options.LargeWriteThreshold,
-			options.FlushInterval,
-			options.MaxIdleBufferAge,
-			options.EnsureNewline,
-			options.LogInternalError,
-			options.Go,
-			options.Clock,
-		)
-	}
+	)
 	startDefaultOutdatedFileCloserOnce()
-	return wc, nil
+	if options.BufferSize < 1 {
+		return fileManager, nil
+	}
+	return newBufferedFileManager(
+		fileManager,
+		options.BufferSize,
+		options.FlushThreshold,
+		options.FlushInterval,
+		options.LargeWriteThreshold,
+		options.MaxIdleBufferAge,
+		options.EnsureNewline,
+		options.LogInternalError,
+		options.Go,
+		options.Clock,
+	), nil
 }
 
 // ErrClosed is returned when an operation is attempted on a WriteCloser that
@@ -262,9 +272,17 @@ func newFileManager(
 	return m
 }
 
-var bufferPool = sync.Pool{New: func() any { return new([]byte) }}
+var newline = [1]byte{'\n'}
 
 func (m *fileManager) Write(p []byte) (int, error) {
+	if n := len(p); m.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
+		nn, err := m.writep(p, newline[:])
+		return min(nn, n), err
+	}
+	return m.writep(p, nil)
+}
+
+func (m *fileManager) writep(first, second []byte) (int, error) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
@@ -276,22 +294,21 @@ func (m *fileManager) Write(p []byte) (int, error) {
 		return 0, err
 	}
 
-	n := len(p)
-	var nn int
-	var err error
-	if m.ensureNewline && !(n >= 1 && p[n-1] == '\n') {
-		buffer := bufferPool.Get().(*[]byte)
-		*buffer = (*buffer)[:0]
-		*buffer = append(*buffer, p...)
-		*buffer = append(*buffer, '\n')
-		nn, err = m.file.Write(*buffer)
-		bufferPool.Put(buffer)
-		n = min(n, nn)
+	var (
+		n   int
+		err error
+	)
+	if file, ok := m.file.(*os.File); ok {
+		n, err = writep(file, first, second)
 	} else {
-		nn, err = m.file.Write(p)
-		n = nn
+		n, err = m.file.Write(first)
+		if err == nil {
+			var n2 int
+			n2, err = m.file.Write(second)
+			n += n2
+		}
 	}
-	m.fileSize += int64(nn)
+	m.fileSize += int64(n)
 	m.fileHasRecentWrites = true
 	return n, err
 }
@@ -503,11 +520,12 @@ func (m *fileManager) Close() error {
 	return err
 }
 
-type bufferedWriteCloser struct {
-	wc                io.WriteCloser
+type bufferedFileManager struct {
+	m                 *fileManager
 	bufferSize        int
-	minLargeWriteSize int
+	minFlushSize      int
 	flushInterval     time.Duration
+	minLargeWriteSize int
 	maxIdleBufferAge  int
 	ensureNewline     bool
 	logInternalError  func(error)
@@ -518,52 +536,73 @@ type bufferedWriteCloser struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 
-	lock                 sync.Mutex
-	isClosing            bool
-	isClosed             bool
-	pendingData          []byte
-	hasPendingData       bool
-	autoFlusherIsRunning bool
+	lock             sync.Mutex
+	isClosing        bool
+	isClosed         bool
+	buffer           []byte
+	bufferStates     [2]*bufferState
+	flusherTrigger   chan struct{}
+	flusherIsRunning bool
 }
 
-func newBufferedWriteCloser(
-	wc io.WriteCloser,
+type bufferState struct {
+	WG         sync.WaitGroup
+	DataOffset int
+	DataLength int
+	HasData    bool
+	Task       []any
+}
+
+type flushTask struct {
+	WG  sync.WaitGroup
+	Err error
+}
+
+type largeWriteTask struct {
+	First  []byte
+	Second []byte
+	WG     sync.WaitGroup
+	N      int
+	Err    error
+}
+
+func newBufferedFileManager(
+	fileManager *fileManager,
 	bufferSize int,
-	largeWriteThreshold float64,
+	flushThreshold float64,
 	flushInterval time.Duration,
+	largeWriteThreshold float64,
 	maxIdleBufferAge int,
 	ensureNewline bool,
 	logInternalError func(error),
 	go_ func(func()),
 	clock clock.Clock,
 ) io.WriteCloser {
+	minFlushSize := int(math.Ceil(float64(bufferSize) * flushThreshold))
 	minLargeWriteSize := int(math.Ceil(float64(bufferSize) * largeWriteThreshold))
 	backgroundCtx, cancel := context.WithCancel(context.Background())
-	return &bufferedWriteCloser{
-		wc:                wc,
+	var bufferStates [2]bufferState
+	return &bufferedFileManager{
+		m:                 fileManager,
 		bufferSize:        bufferSize,
-		minLargeWriteSize: minLargeWriteSize,
+		minFlushSize:      minFlushSize,
 		flushInterval:     flushInterval,
-		ensureNewline:     ensureNewline,
+		minLargeWriteSize: minLargeWriteSize,
 		maxIdleBufferAge:  maxIdleBufferAge,
+		ensureNewline:     ensureNewline,
 		logInternalError:  logInternalError,
 		go_:               go_,
 		clock:             clock,
 		backgroundCtx:     backgroundCtx,
 		cancel:            cancel,
+		bufferStates:      [2]*bufferState{&bufferStates[0], &bufferStates[1]},
+		flusherTrigger:    make(chan struct{}, 1),
 	}
 }
 
-func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
-	wc.lock.Lock()
-	defer wc.lock.Unlock()
-
-	if wc.isClosed {
-		return 0, ErrClosed
-	}
-
+func (m *bufferedFileManager) Write(p []byte) (int, error) {
 	n := len(p)
-	appendNewline := wc.ensureNewline && !(n >= 1 && p[n-1] == '\n')
+	appendNewline := m.ensureNewline && !(n >= 1 && p[n-1] == '\n')
 	var nn int
 	if appendNewline {
 		nn = n + 1
@@ -571,126 +610,240 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 		nn = n
 	}
 
-	if nn <= wc.bufferSize-len(wc.pendingData) {
-		// remaining buffer space is sufficient
-		if len(wc.pendingData) == 0 && nn >= wc.minLargeWriteSize {
-			return wc.wc.Write(p)
+	lock := &m.lock
+	lock.Lock()
+	defer func() {
+		if lock != nil {
+			lock.Unlock()
 		}
-	} else {
+	}()
+
+	if m.isClosed {
+		return 0, ErrClosed
+	}
+	bufferState := m.bufferStates[0]
+
+	if nn >= m.minLargeWriteSize {
+		// large write
+		task := &largeWriteTask{First: p}
+		if appendNewline {
+			task.Second = newline[:]
+		}
+		task.WG.Add(1)
+		bufferState.Task = append(bufferState.Task, task)
+		m.startFlusherLocked()
+		lock.Unlock()
+		lock = nil
+
+		m.triggerFlusher()
+		task.WG.Wait()
+		return min(task.N, n), task.Err
+	}
+
+	for nn > m.bufferSize-bufferState.DataLength {
 		// remaining buffer space is insufficient
-		if len(wc.pendingData) >= 1 {
-			if err := wc.flushLocked(); err != nil {
-				return 0, err
-			}
+		task := &flushTask{}
+		task.WG.Add(1)
+		bufferState.Task = append(bufferState.Task, task)
+		m.startFlusherLocked()
+		lock.Unlock()
+		lock = nil
+
+		m.triggerFlusher()
+		task.WG.Wait()
+		if task.Err != nil {
+			return 0, task.Err
 		}
-		if nn >= wc.minLargeWriteSize {
-			return wc.wc.Write(p)
+
+		lock = &m.lock
+		lock.Lock()
+
+		if m.isClosed {
+			return 0, ErrClosed
 		}
+		bufferState = m.bufferStates[0]
 	}
 
-	if wc.pendingData == nil {
-		wc.pendingData = make([]byte, 0, wc.bufferSize)
+	// remaining buffer space is sufficient
+	b := m.buffer
+	if b == nil {
+		b = make([]byte, m.bufferSize)
+		m.buffer = b
 	}
-	wc.pendingData = append(wc.pendingData, p...)
+	i := (bufferState.DataOffset + bufferState.DataLength) % m.bufferSize
+	j := (bufferState.DataOffset + bufferState.DataLength + n) % m.bufferSize
+	bufferState.WG.Add(1)
+	bufferState.DataLength += nn
+	bufferState.HasData = true // even if nn == 0
+	m.startFlusherLocked()
+	flushNow := bufferState.DataLength >= m.minFlushSize
+	lock.Unlock()
+	lock = nil
+
+	if flushNow {
+		m.triggerFlusher()
+	}
+
+	// copy data to buffer without locking
+	p = p[copy(b[i:], p):]
+	if len(p) >= 1 {
+		copy(b, p)
+	}
 	if appendNewline {
-		wc.pendingData = append(wc.pendingData, '\n')
+		b[j] = '\n'
 	}
-	wc.hasPendingData = true // even if len(wc.pendingData) == 0
+	bufferState.WG.Done()
 
-	wc.startAutoFlusherLocked()
 	return n, nil
 }
 
-func (wc *bufferedWriteCloser) startAutoFlusherLocked() {
-	if wc.autoFlusherIsRunning {
-		return
+func (m *bufferedFileManager) triggerFlusher() {
+	select {
+	case m.flusherTrigger <- struct{}{}:
+	default:
 	}
-	if wc.isClosing {
-		return
-	}
-
-	wc.wg.Add(1)
-	wc.go_(func() {
-		defer wc.wg.Done()
-
-		wc.runAutoFlusher()
-	})
-	wc.autoFlusherIsRunning = true
 }
 
-func (wc *bufferedWriteCloser) runAutoFlusher() {
-	ticker := wc.clock.Ticker(wc.flushInterval)
+func (m *bufferedFileManager) startFlusherLocked() {
+	if m.flusherIsRunning {
+		return
+	}
+	if m.isClosing {
+		return
+	}
+
+	m.wg.Add(1)
+	m.go_(func() {
+		defer m.wg.Done()
+
+		m.runFlusher()
+	})
+	m.flusherIsRunning = true
+}
+
+func (m *bufferedFileManager) runFlusher() {
+	ticker := m.clock.Ticker(m.flushInterval)
 	defer ticker.Stop()
 
 	idleBufferAge := 0
 	for {
+		isTimedOut := false
 		select {
+		case <-m.flusherTrigger:
 		case <-ticker.C:
-		case <-wc.backgroundCtx.Done():
+			isTimedOut = true
+		case <-m.backgroundCtx.Done():
 			return
 		}
 
-		if ok := func() bool {
-			wc.lock.Lock()
-			defer wc.lock.Unlock()
-
-			if wc.hasPendingData {
-				idleBufferAge = 0
-				if err := wc.flushLocked(); err != nil {
-					wc.logInternalError(err)
-				}
-			} else {
-				idleBufferAge++
-				if idleBufferAge > wc.maxIdleBufferAge {
-					wc.pendingData = nil
-					wc.autoFlusherIsRunning = false
-					return false
-				}
+		m.lock.Lock()
+		bufferState := m.bufferStates[0]
+		if isTimedOut && !bufferState.HasData && bufferState.Task == nil {
+			idleBufferAge++
+			if idleBufferAge > m.maxIdleBufferAge {
+				m.buffer = nil
+				bufferState.DataOffset = 0
+				bufferState.DataLength = 0
+				m.flusherIsRunning = false
+				m.lock.Unlock()
+				return
 			}
-			return true
-		}(); !ok {
-			return
+			m.lock.Unlock()
+			continue
 		}
+		bufferState, frozenBufferState := m.swapBufferStatesLocked()
+		m.lock.Unlock()
+
+		if err := m.processTasks(bufferState, frozenBufferState); err != nil {
+			m.logInternalError(err)
+		}
+
+		idleBufferAge = 0
 	}
 }
 
-func (wc *bufferedWriteCloser) flushLocked() error {
-	n, err := wc.wc.Write(wc.pendingData)
-	if err != nil {
-		if n >= 1 {
-			copy(wc.pendingData, wc.pendingData[n:])
-			wc.pendingData = wc.pendingData[:len(wc.pendingData)-n]
-		}
+func (m *bufferedFileManager) swapBufferStatesLocked() (*bufferState, *bufferState) {
+	bs0 := m.bufferStates[0]
+	bs1 := m.bufferStates[1]
+	bs1.DataOffset = bs0.DataOffset
+	bs1.DataLength = bs0.DataLength
+	bs1.HasData = bs0.HasData
+	m.bufferStates[0] = bs1
+	m.bufferStates[1] = bs0
+	return bs1, bs0
+}
+
+func (m *bufferedFileManager) processTasks(bufferState, frozenBufferState *bufferState) error {
+	err := m.flush(bufferState, frozenBufferState)
+	if frozenBufferState.Task == nil {
 		return err
 	}
-
-	wc.hasPendingData = false
-	wc.pendingData = wc.pendingData[:0]
+	for _, task := range frozenBufferState.Task {
+		switch task := task.(type) {
+		case *flushTask:
+			task.Err = err
+			task.WG.Done()
+		case *largeWriteTask:
+			if err == nil {
+				task.N, task.Err = m.m.writep(task.First, task.Second)
+				err = task.Err
+			} else {
+				task.Err = err
+			}
+			task.WG.Done()
+		default:
+			panic("unreachable")
+		}
+	}
+	frozenBufferState.Task = nil
+	// err will be handled by task submitters
 	return nil
 }
 
-func (wc *bufferedWriteCloser) Close() error {
-	wc.lock.Lock()
-	wc.isClosing = true
-	wc.lock.Unlock()
+func (m *bufferedFileManager) flush(bufferState, frozenBufferState *bufferState) error {
+	if !frozenBufferState.HasData {
+		return nil
+	}
+	frozenBufferState.WG.Wait()
+	var (
+		n   int
+		err error
+	)
+	if i := frozenBufferState.DataOffset + frozenBufferState.DataLength; i <= m.bufferSize {
+		n, err = m.m.writep(m.buffer[frozenBufferState.DataOffset:i], nil)
+	} else {
+		n, err = m.m.writep(m.buffer[frozenBufferState.DataOffset:], m.buffer[:i-m.bufferSize])
+	}
+	if bufferState != nil {
+		m.lock.Lock()
+		bufferState.DataOffset = (bufferState.DataOffset + n) % m.bufferSize
+		bufferState.DataLength -= n
+		bufferState.HasData = bufferState.DataLength >= 1
+		m.lock.Unlock()
+	}
+	return err
+}
 
-	wc.cancel()
-	wc.wg.Wait()
+func (m *bufferedFileManager) Close() error {
+	m.lock.Lock()
+	m.isClosing = true
+	m.lock.Unlock()
 
-	wc.lock.Lock()
-	defer wc.lock.Unlock()
+	m.cancel()
+	m.wg.Wait()
 
-	if wc.isClosed {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if m.isClosed {
 		return ErrClosed
 	}
 
-	var err1 error
-	if wc.hasPendingData {
-		err1 = wc.flushLocked()
-	}
-	wc.pendingData = nil
+	err1 := m.processTasks(nil, m.bufferStates[0])
+	m.buffer = nil
 
-	err2 := wc.wc.Close()
-	wc.isClosed = true
+	err2 := m.m.Close()
+	m.isClosed = true
+
 	return errors.Join(err1, err2)
 }

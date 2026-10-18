@@ -388,42 +388,6 @@ func Test_Write(t *testing.T) {
 	)
 
 	t.Run(
-		"buffer should not be flushed if some data is buffered before the large write",
-		func(t *testing.T) {
-			clock := clock.NewMock()
-			clock.Set(t0)
-			fs := afero.NewMemMapFs()
-
-			wc, err := OpenFile(Options{
-				Clock:    clock,
-				Fs:       fs,
-				Registry: &sync.Map{},
-
-				FilePathPattern:     "/log/%Y-%m-%d-%H.log",
-				BufferSize:          100,
-				LargeWriteThreshold: 0.05,
-				FlushInterval:       time.Minute,
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				err := wc.Close()
-				assert.NoError(t, err)
-			})
-
-			n, err := wc.Write([]byte("a\n"))
-			require.NoError(t, err)
-			require.Equal(t, 2, n)
-
-			n, err = wc.Write([]byte("bcdef\n"))
-			require.NoError(t, err)
-			require.Equal(t, 6, n)
-
-			ok, err := afero.Exists(fs, "/log/2001-02-03-04.log")
-			require.False(t, ok)
-		},
-	)
-
-	t.Run(
 		"flushes buffered data if buffer is unsufficient for the new write",
 		func(t *testing.T) {
 			clock := clock.NewMock()
