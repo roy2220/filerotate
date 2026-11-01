@@ -167,18 +167,18 @@ type writeCloser struct {
 	logInternalError func(error)
 	registry         *sync.Map
 
-	lock                sync.Mutex
-	isClosed            bool
-	baseFilePathBytes   []byte
-	baseFilePathTime    int64
-	baseFilePath        string
-	fileIndex           int
-	filePath            string
-	fileSize            int64
-	file                *os.File
-	fileHasRecentWrites bool
-	writer              writev.Writer
-	buffers             [3][]byte
+	lock              sync.Mutex
+	isClosed          bool
+	hasRecentWrites   bool
+	baseFilePathBytes []byte
+	baseFilePathTime  int64
+	baseFilePath      string
+	fileIndex         int
+	filePath          string
+	fileSize          int64
+	file              *os.File
+	writer            writev.Writer
+	buffers           [3][]byte
 }
 
 func newWriteCloser(
@@ -243,6 +243,8 @@ func (wc *writeCloser) writeBuffers(p1, p2 []byte, appendNewline bool) (int, err
 		return 0, ErrClosed
 	}
 
+	wc.hasRecentWrites = true
+
 	if err := wc.rotateFileLocked(); err != nil {
 		return 0, err
 	}
@@ -256,7 +258,6 @@ func (wc *writeCloser) writeBuffers(p1, p2 []byte, appendNewline bool) (int, err
 	clear(wc.buffers[:])
 
 	wc.fileSize += int64(n)
-	wc.fileHasRecentWrites = true
 	return min(n, len(p1)+len(p2)), err
 }
 
@@ -323,7 +324,6 @@ func (wc *writeCloser) openLatestFileLocked(now time.Time) (returnedErr error) {
 	wc.filePath = latestFilePath
 	wc.fileSize = latestFileSize
 	wc.file = latestFile
-	wc.fileHasRecentWrites = false
 	wc.writer = writer
 	return nil
 }
@@ -370,7 +370,6 @@ func (wc *writeCloser) rotateFileForTimeLocked(now time.Time) (returnedErr error
 		wc.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
 	}
 	wc.file = newFile
-	wc.fileHasRecentWrites = false
 	wc.writer = writer
 	return nil
 }
@@ -414,7 +413,6 @@ func (wc *writeCloser) rotateFileForSizeLocked() (returnedErr error) {
 		wc.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
 	}
 	wc.file = newFile
-	wc.fileHasRecentWrites = false
 	wc.writer = writer
 	return nil
 }
@@ -459,11 +457,12 @@ func (wc *writeCloser) CloseOutdatedFile(now time.Time) {
 	if wc.isClosed {
 		return
 	}
-	if wc.file == nil {
+	if wc.hasRecentWrites {
+		// 'now' can be stale compared to the time of recent writes, just bypass
+		wc.hasRecentWrites = false
 		return
 	}
-	if wc.fileHasRecentWrites {
-		wc.fileHasRecentWrites = false
+	if wc.file == nil {
 		return
 	}
 	if wc.baseFilePath == string(wc.renderBaseFilePathLocked(now)) {
@@ -479,7 +478,6 @@ func (wc *writeCloser) CloseOutdatedFile(now time.Time) {
 	wc.filePath = ""
 	wc.fileSize = 0
 	wc.file = nil
-	wc.fileHasRecentWrites = false
 	wc.writer = writev.Writer{}
 }
 
