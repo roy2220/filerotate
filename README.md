@@ -3,12 +3,10 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/roy2220/filerotate.svg)](https://pkg.go.dev/github.com/roy2220/filerotate)
 [![Coverage](./.badges/coverage.svg)](#)
 
-Go package **`filerotate`** provides an `io.WriteCloser` that handles **time-based and size-based file rotation**, optionally combined with a **self-managing write buffer**.
+Go package `filerotate` provides an `io.WriteCloser` that handles **time-based and size-based file rotation**, optionally combined with a **self-managing write buffer**.
 
 > [!NOTE]
-> Except for the documentation, every line of code is human-crafted. **No AI slop included**.
-
----
+> The source code is handcrafted by a human. AI only assisted with docs and tests. No AI slop.
 
 ## Features
 
@@ -30,8 +28,6 @@ The built-in buffer avoids this. It flushes whole writes only and checks for
 rotation between them, so a log line is never cut into two files. It also
 flushes periodically, is safe for concurrent use, and releases its memory when
 idle.
-
----
 
 ## Usage
 
@@ -82,8 +78,6 @@ func main() {
 Always call `Close` when you are done: it flushes buffered data and releases
 resources. A writer that is never closed may lose buffered data.
 
----
-
 ## Options
 
 ### General
@@ -104,8 +98,6 @@ resources. A writer that is never closed may lose buffered data.
 | `MinDirectWriteSize` | `int` | `64KiB` | Writes at least this large skip the buffer and go straight to the file. Zero or negative uses the default. |
 | `FlushInterval` | `time.Duration` | `1s` | How often buffered data is flushed automatically. Zero or negative uses the default. |
 | `MaxIdleBufferAge` | `int` | `3` | Number of consecutive idle flush intervals after which the buffer's memory is released. Zero or negative uses the default. |
-
----
 
 ## License
 
