@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,7 +26,7 @@ const (
 )
 
 var (
-	defaultLogInternalError = func(err error) { log.Println(err) }
+	defaultLogInternalError = func(err error) { fmt.Fprintf(os.Stderr, "%v filerotate: %v\n", time.Now().Format(time.RFC3339), err) }
 	defaultGo               = func(f func()) { go f() }
 	defaultRegistry         = &sync.Map{}
 )
@@ -54,8 +53,8 @@ type Options struct {
 	EnsureNewline bool
 
 	// LogInternalError is called with errors that cannot be returned to the
-	// caller, such as background flush failures. If nil, errors are logged
-	// via the standard logger.
+	// caller, such as background flush failures. If nil, errors are written
+	// to standard error with a timestamp.
 	LogInternalError func(error)
 
 	// The options below are for buffering.

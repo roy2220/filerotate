@@ -88,7 +88,7 @@ resources. A writer that is never closed may lose buffered data.
 | `SymbolicLinkPath` | `string` | Path of a symbolic link that always points to the active file. Empty disables it. |
 | `FileSizeLimit` | `int64` | Size in bytes after which writes go to a new file. A file may slightly exceed it. Zero or negative disables size-based rotation. |
 | `EnsureNewline` | `bool` | Append `\n` to each write unless it already ends with one. This costs almost nothing: the newline may be gathered with the data via `writev(2)`. |
-| `LogInternalError` | `func(error)` | Called with errors that cannot be returned to the caller, such as background flush failures. Defaults to the standard logger. |
+| `LogInternalError` | `func(error)` | Called with errors that cannot be returned to the caller, such as background flush failures. `nil` means errors are written to standard error with a timestamp. |
 
 ### Buffering
 
