@@ -18,8 +18,8 @@ func (o *Options) Registry() *sync.Map { return o.registry }
 type WriteCloser = writeCloser
 
 func (wc *writeCloser) File() *os.File {
-	wc.lock1.Lock()
-	defer wc.lock1.Unlock()
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
 	return wc.file
 }
 

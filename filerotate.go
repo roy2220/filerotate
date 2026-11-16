@@ -166,7 +166,7 @@ type writeCloser struct {
 	logInternalError func(error)
 	registry         *sync.Map
 
-	lock1             sync.Mutex
+	mu                sync.Mutex
 	isClosed          bool
 	hasRecentWrites   bool
 	baseFilePathBytes []byte
@@ -507,9 +507,9 @@ func (wc *writeCloser) Close() error {
 }
 
 func (wc *writeCloser) lock() error {
-	wc.lock1.Lock()
+	wc.mu.Lock()
 	if wc.isClosed {
-		wc.lock1.Unlock()
+		wc.mu.Unlock()
 		return ErrClosed
 	}
 	return nil
@@ -518,7 +518,7 @@ func (wc *writeCloser) lock() error {
 func (wc *writeCloser) unlock() {
 	errs := wc.internalErrs
 	wc.internalErrs = nil
-	wc.lock1.Unlock()
+	wc.mu.Unlock()
 
 	for _, err := range errs {
 		wc.logInternalError(err)
@@ -539,7 +539,7 @@ type bufferedWriteCloser struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 
-	lock1                sync.Mutex
+	mu                   sync.Mutex
 	closePhase           int
 	hasPendingWrites     bool
 	pendingData          []byte
@@ -705,9 +705,9 @@ func (wc *bufferedWriteCloser) Close() error {
 }
 
 func (wc *bufferedWriteCloser) lock() error {
-	wc.lock1.Lock()
+	wc.mu.Lock()
 	if wc.closePhase == 2 {
-		wc.lock1.Unlock()
+		wc.mu.Unlock()
 		return ErrClosed
 	}
 	return nil
@@ -716,7 +716,7 @@ func (wc *bufferedWriteCloser) lock() error {
 func (wc *bufferedWriteCloser) unlock() {
 	errs := wc.internalErrs
 	wc.internalErrs = nil
-	wc.lock1.Unlock()
+	wc.mu.Unlock()
 
 	for _, err := range errs {
 		wc.logInternalError(err)
