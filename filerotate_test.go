@@ -752,6 +752,40 @@ func TestBufferedWriteCloser_Close(t *testing.T) {
 			require.Equal(t, "hello world!", string(data))
 		})
 	})
+
+	t.Run("concurrent close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wc, _ := openTempFile(t, Options{
+				FilePathPattern:    "app-%Y-%m-%d_%H.log",
+				BufferSize:         100,
+				MinDirectWriteSize: 10,
+				FlushInterval:      1 * time.Hour,
+				MaxIdleBufferAge:   5,
+			})
+			_, err := wc.Write([]byte("hello world!"))
+			require.NoError(t, err)
+
+			time.Sleep(1 * time.Second)
+			synctest.Wait()
+
+			errs := make(chan error, 10)
+			for range cap(errs) {
+				errs <- wc.Close()
+				if len(errs) == cap(errs) {
+					close(errs)
+				}
+			}
+			errCnt := 0
+			for err := range errs {
+				if err == nil {
+					continue
+				}
+				require.ErrorIs(t, err, ErrClosed)
+				errCnt++
+			}
+			require.Equal(t, cap(errs)-1, errCnt)
+		})
+	})
 }
 
 func TestComprehensive(t *testing.T) {

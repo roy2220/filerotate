@@ -166,7 +166,7 @@ type writeCloser struct {
 	logInternalError func(error)
 	registry         *sync.Map
 
-	lock              sync.Mutex
+	lock1             sync.Mutex
 	isClosed          bool
 	hasRecentWrites   bool
 	baseFilePathBytes []byte
@@ -178,6 +178,7 @@ type writeCloser struct {
 	file              *os.File
 	writer            writev.Writer
 	buffers           [3][]byte
+	internalErrs      []error
 }
 
 func newWriteCloser(
@@ -188,7 +189,7 @@ func newWriteCloser(
 	logInternalError func(error),
 	registry *sync.Map,
 ) *writeCloser {
-	m := &writeCloser{
+	wc := &writeCloser{
 		filePathPattern:  filePathPattern,
 		symbolicLinkPath: symbolicLinkPath,
 		fileSizeLimit:    fileSizeLimit,
@@ -196,11 +197,11 @@ func newWriteCloser(
 		logInternalError: logInternalError,
 		registry:         registry,
 	}
-	registry.Store(m, struct{}{})
+	registry.Store(wc, struct{}{})
 	if registry == defaultRegistry {
 		startDefaultOutdatedFileCloserOnce()
 	}
-	return m
+	return wc
 }
 
 var startDefaultOutdatedFileCloserOnce = sync.OnceFunc(func() {
@@ -220,7 +221,8 @@ func runOutdatedFileCloser(ctx context.Context, registry *sync.Map) {
 		}
 
 		registry.Range(func(key, _ any) bool {
-			key.(*writeCloser).CloseOutdatedFile(now)
+			wc := key.(*writeCloser)
+			wc.CloseOutdatedFile(now)
 			return true
 		})
 	}
@@ -235,12 +237,10 @@ func (wc *writeCloser) Write(p []byte) (int, error) {
 var newline = [1]byte{'\n'}
 
 func (wc *writeCloser) writeBuffers(p1, p2 []byte, appendNewline bool) (int, error) {
-	wc.lock.Lock()
-	defer wc.lock.Unlock()
-
-	if wc.isClosed {
-		return 0, ErrClosed
+	if err := wc.lock(); err != nil {
+		return 0, err
 	}
+	defer wc.unlock()
 
 	wc.hasRecentWrites = true
 
@@ -280,7 +280,7 @@ func (wc *writeCloser) rotateFileLocked() error {
 
 	if wc.symbolicLinkPath != "" && wc.filePath != oldFilePath {
 		if err := updateSymbolicLink(wc.symbolicLinkPath, wc.filePath, now); err != nil {
-			wc.logInternalError(err)
+			wc.internalErrs = append(wc.internalErrs, err)
 		}
 	}
 
@@ -366,7 +366,7 @@ func (wc *writeCloser) rotateFileForTimeLocked(now time.Time) (returnedErr error
 	wc.filePath = newFilePath
 	wc.fileSize = 0
 	if err := wc.file.Close(); err != nil {
-		wc.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
+		wc.internalErrs = append(wc.internalErrs, fmt.Errorf("filerotate: close file: %w", err))
 	}
 	wc.file = newFile
 	wc.writer = writer
@@ -409,7 +409,7 @@ func (wc *writeCloser) rotateFileForSizeLocked() (returnedErr error) {
 	wc.filePath = newFilePath
 	wc.fileSize = 0
 	if err := wc.file.Close(); err != nil {
-		wc.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
+		wc.internalErrs = append(wc.internalErrs, fmt.Errorf("filerotate: close file: %w", err))
 	}
 	wc.file = newFile
 	wc.writer = writer
@@ -450,12 +450,11 @@ func updateSymbolicLink(symbolicLinkPath string, filePath string, now time.Time)
 }
 
 func (wc *writeCloser) CloseOutdatedFile(now time.Time) {
-	wc.lock.Lock()
-	defer wc.lock.Unlock()
-
-	if wc.isClosed {
+	if wc.lock() != nil {
 		return
 	}
+	defer wc.unlock()
+
 	if wc.hasRecentWrites {
 		// 'now' can be stale compared to the time of recent writes, just bypass
 		wc.hasRecentWrites = false
@@ -469,7 +468,7 @@ func (wc *writeCloser) CloseOutdatedFile(now time.Time) {
 	}
 
 	if err := wc.file.Close(); err != nil {
-		wc.logInternalError(fmt.Errorf("filerotate: close file: %w", err))
+		wc.internalErrs = append(wc.internalErrs, fmt.Errorf("filerotate: close file: %w", err))
 	}
 
 	wc.baseFilePath = ""
@@ -491,12 +490,10 @@ func (wc *writeCloser) renderBaseFilePathLocked(now time.Time) []byte {
 func (wc *writeCloser) Close() error {
 	wc.registry.Delete(wc)
 
-	wc.lock.Lock()
-	defer wc.lock.Unlock()
-
-	if wc.isClosed {
-		return ErrClosed
+	if err := wc.lock(); err != nil {
+		return err
 	}
+	defer wc.unlock()
 
 	var err error
 	if wc.file != nil {
@@ -507,6 +504,25 @@ func (wc *writeCloser) Close() error {
 	}
 	wc.isClosed = true
 	return err
+}
+
+func (wc *writeCloser) lock() error {
+	wc.lock1.Lock()
+	if wc.isClosed {
+		wc.lock1.Unlock()
+		return ErrClosed
+	}
+	return nil
+}
+
+func (wc *writeCloser) unlock() {
+	errs := wc.internalErrs
+	wc.internalErrs = nil
+	wc.lock1.Unlock()
+
+	for _, err := range errs {
+		wc.logInternalError(err)
+	}
 }
 
 type bufferedWriteCloser struct {
@@ -523,12 +539,12 @@ type bufferedWriteCloser struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 
-	lock                 sync.Mutex
-	isClosing            bool
-	isClosed             bool
+	lock1                sync.Mutex
+	closePhase           int
 	hasPendingWrites     bool
 	pendingData          []byte
 	autoFlusherIsRunning bool
+	internalErrs         []error
 }
 
 func newBufferedWriteCloser(
@@ -563,12 +579,10 @@ func (wc *bufferedWriteCloser) Write(p []byte) (int, error) {
 		n++
 	}
 
-	wc.lock.Lock()
-	defer wc.lock.Unlock()
-
-	if wc.isClosed {
-		return 0, ErrClosed
+	if err := wc.lock(); err != nil {
+		return 0, err
 	}
+	defer wc.unlock()
 
 	if n >= min(wc.minDirectWriteSize, wc.bufferSize) {
 		// direct write
@@ -598,7 +612,7 @@ func (wc *bufferedWriteCloser) startAutoFlusherLocked() {
 	if wc.autoFlusherIsRunning {
 		return
 	}
-	if wc.isClosing {
+	if wc.closePhase == 1 {
 		return
 	}
 
@@ -624,13 +638,15 @@ func (wc *bufferedWriteCloser) runAutoFlusher() {
 		}
 
 		if ok := func() bool {
-			wc.lock.Lock()
-			defer wc.lock.Unlock()
+			if wc.lock() != nil {
+				panic("unreachable")
+			}
+			defer wc.unlock()
 
 			if wc.hasPendingWrites {
 				idleBufferAge = 0
 				if _, err := wc.flushAndWriteLocked(nil, false); err != nil {
-					wc.logInternalError(fmt.Errorf("filerotate: write file: %w", err))
+					wc.internalErrs = append(wc.internalErrs, fmt.Errorf("filerotate: write file: %w", err))
 				}
 			} else {
 				idleBufferAge++
@@ -663,19 +679,19 @@ func (wc *bufferedWriteCloser) flushAndWriteLocked(p []byte, appendNewline bool)
 }
 
 func (wc *bufferedWriteCloser) Close() error {
-	wc.lock.Lock()
-	wc.isClosing = true
-	wc.lock.Unlock()
+	if err := wc.lock(); err != nil {
+		return err
+	}
+	wc.closePhase = 1
+	wc.unlock()
 
 	wc.cancel()
 	wc.wg.Wait()
 
-	wc.lock.Lock()
-	defer wc.lock.Unlock()
-
-	if wc.isClosed {
-		return ErrClosed
+	if err := wc.lock(); err != nil {
+		return err
 	}
+	defer wc.unlock()
 
 	var err1 error
 	if wc.hasPendingWrites {
@@ -684,6 +700,25 @@ func (wc *bufferedWriteCloser) Close() error {
 	wc.pendingData = nil
 
 	err2 := wc.wc.Close()
-	wc.isClosed = true
+	wc.closePhase = 2
 	return errors.Join(err1, err2)
+}
+
+func (wc *bufferedWriteCloser) lock() error {
+	wc.lock1.Lock()
+	if wc.closePhase == 2 {
+		wc.lock1.Unlock()
+		return ErrClosed
+	}
+	return nil
+}
+
+func (wc *bufferedWriteCloser) unlock() {
+	errs := wc.internalErrs
+	wc.internalErrs = nil
+	wc.lock1.Unlock()
+
+	for _, err := range errs {
+		wc.logInternalError(err)
+	}
 }
